@@ -614,14 +614,14 @@ impl State {
             }
             TEX_NEW => {
                 let id = r.u64();
-                let (status, size) = match self.tex_new(id, &mut r) {
-                    Ok(s) => (0, s),
+                let (status, rid) = match self.tex_new(id, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_NEW {id:#x}: {e}");
                         (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(size);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             TEX_REPLACE => {
@@ -811,26 +811,26 @@ impl State {
             }
             TEX_NEW_BUF => {
                 let (id, buf) = (r.u64(), r.u64());
-                let (status, size) = match self.tex_new_buf(id, buf, &mut r) {
-                    Ok(s) => (0, s),
+                let (status, rid) = match self.tex_new_buf(id, buf, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_NEW_BUF {id:#x}: {e}");
                         (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(size);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             TEX_VIEW => {
                 let (id, parent) = (r.u64(), r.u64());
-                let status = match self.tex_view(id, parent, &mut r) {
-                    Ok(()) => 0,
+                let (status, rid) = match self.tex_view(id, parent, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_VIEW {id:#x} of {parent:#x}: {e}");
-                        -1
+                        (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(0);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             _ => {
@@ -1021,8 +1021,9 @@ impl State {
         }
         let k = if desc.storage_mode == StorageMode::Private { Kind::TexPrivate } else { Kind::TexShared };
         self.kinds.insert(id, (k, tex_bytes(&desc)));
+        let rid = t.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(t));
-        Ok(0)
+        Ok(rid)
     }
 
     /// A texture over a buffer's bytes: an IOSurface plane (the surface's memfd pages, imported as the buffer) or
@@ -1075,21 +1076,23 @@ impl State {
                         eprintln!("mtlvk: texture {id:#x}: drawn in VRAM, copied to the surface after each command buffer");
                     }
                     self.proxies.insert(id, Proxy { buf: b, offset, bpr });
+                    let rid = v.gpu_resource_id().to_bits();
                     self.objs.insert(id, Obj::Tex(v));
                     self.kinds.insert(id, (Kind::TexProxy, 0));
-                    return Ok(0);
+                    return Ok(rid);
                 }
                 Err(e) => eprintln!("mtlvk: texture {id:#x}: no VRAM proxy ({e}); drawing into the surface"),
             }
         }
         let t = self.indexed(id, desc.pixel_format, desc.usage, |_, i| b.new_texture(&desc, i, offset, bpr).map_err(err("buffer new_texture")))?;
+        let rid = t.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(t));
         self.kinds.insert(id, (Kind::TexOverBuf, 0));
-        Ok(0)
+        Ok(rid)
     }
 
     /// x86Sim: newTextureViewWithPixelFormat:[textureType:levels:slices:[swizzle:]]
-    fn tex_view(&mut self, id: u64, parent: u64, r: &mut Rd) -> Res<()> {
+    fn tex_view(&mut self, id: u64, parent: u64, r: &mut Rd) -> Res<u64> {
         let (pf, ttype) = (r.u32(), r.u32());
         let (l0, ln, s0, sn) = (r.u64(), r.u64(), r.u64(), r.u64());
         let (has_swizzle, sw) = (r.u32(), r.u32());
@@ -1118,9 +1121,10 @@ impl State {
         if self.log {
             eprintln!("mtlvk: texture view {id:#x} of {parent:#x}: {pf:?} {tt:?} levels {l0}+{ln} slices {s0}+{sn}");
         }
+        let rid = v.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(v));
         self.kinds.insert(id, (Kind::TexView, 0));
-        Ok(())
+        Ok(rid)
     }
 
     fn texdesc(r: &mut Rd) -> Res<TextureDescriptor> {
