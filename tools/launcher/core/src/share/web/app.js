@@ -104,81 +104,135 @@ function dashboard() {
   currentPhone = null;
   $("#crumb").textContent = "Phones";
   document.title = "x86Sim Phones";
-  const grid = h("div", { class: "grid" });
-  main.append(grid);
-  const cards = new Map();
-  let n = 0, alive = true;
-  // masonry: a card spans ceil((its height + the gap) / (row 4 px)) grid rows; recomputed when any card changes size
-  // (an image arrives, a Duo folds, the window narrows)
-  let pending = 0;
-  function layoutMasonry() {
-    pending = 0;
-    const cs = getComputedStyle(grid), row = parseFloat(cs.gridAutoRows) || 4, gap = parseFloat(cs.getPropertyValue("--gap")) || 16;
-    for (const c of cards.values()) {
-      const hgt = c.el.getBoundingClientRect().height;
-      if (hgt) c.el.style.gridRowEnd = "span " + Math.ceil((hgt + gap) / row);
+  const control = ME.role === "control";
+  // what the viewer picked, kept in this browser (a remembered convenience only: the page works without it)
+  const PREF = "x86sim.dash";
+  let pref = { q: "", kind: "all", sort: "name", view: "grid" };
+  try { Object.assign(pref, JSON.parse(localStorage.getItem(PREF) || "{}")); } catch (_) {}
+  const save = () => { try { localStorage.setItem(PREF, JSON.stringify(pref)); } catch (_) {} };
+
+  const KINDS = [["all", "All"], ["iphone", "iPhone"], ["ipad", "iPad"], ["tv", "TV"], ["watch", "Watch"], ["vision", "Vision"]];
+  const kindOf = (p) => p.platform === "tvos" ? "tv" : p.platform === "watchos" ? "watch" : p.platform === "xros" ? "vision" : p.ipad ? "ipad" : "iphone";
+  const KIND_ORDER = { iphone: 0, ipad: 1, tv: 2, watch: 3, vision: 4 };
+  const SORTS = [["name", "Name"], ["kind", "Device type"], ["memory", "Memory"], ["cpu", "CPU"], ["uptime", "Recently started"]];
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  const sorters = {
+    name: byName,
+    kind: (a, b) => KIND_ORDER[kindOf(a)] - KIND_ORDER[kindOf(b)] || byName(a, b),
+    memory: (a, b) => (b.memory_mb || 0) - (a.memory_mb || 0) || byName(a, b),
+    cpu: (a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0) || byName(a, b),
+    uptime: (a, b) => (a.uptime_s ?? Infinity) - (b.uptime_s ?? Infinity) || byName(a, b),
+  };
+
+  // toolbar: search, device types, sort, grid / list
+  const search = h("input", { type: "search", class: "dsearch", placeholder: "Search name or model", value: pref.q, "aria-label": "Search phones" });
+  const chips = h("div", { class: "chips", role: "group", "aria-label": "Device type" });
+  const sortSel = h("select", { "aria-label": "Sort" }, SORTS.map(([v, t]) => h("option", { value: v, text: t, selected: pref.sort === v })));
+  const viewGrid = h("button", { class: "btn small", text: "Grid", title: "Cards" });
+  const viewList = h("button", { class: "btn small", text: "List", title: "Rows" });
+  const bar = h("div", { class: "dashbar" }, search, chips, h("div", { class: "grow" }), h("label", { class: "meta sortlbl" }, "Sort ", sortSel), h("div", { class: "seg" }, viewGrid, viewList));
+  const secRun = h("section", { class: "dsec" }, h("h2", {}, "Running ", h("span", { class: "count" })), h("div"));
+  const secOff = h("section", { class: "dsec" }, h("h2", {}, "Off ", h("span", { class: "count" })), h("div"));
+  const empty = h("div", { class: "empty" });
+  main.append(bar, secRun, secOff, empty);
+
+  const cards = new Map();  // id -> the element of the current view + its parts
+  let phones = [], n = 0, alive = true;
+  function setView(v) {
+    pref.view = v; save();
+    viewGrid.classList.toggle("on", v === "grid"); viewList.classList.toggle("on", v === "list");
+    for (const s of [secRun, secOff]) s.lastChild.className = v === "list" ? "dlist" : "dgrid";
+    for (const c of cards.values()) c.el.remove();
+    cards.clear();
+    render();
+  }
+  viewGrid.onclick = () => setView("grid");
+  viewList.onclick = () => setView("list");
+  search.oninput = () => { pref.q = search.value; save(); render(); };
+  sortSel.onchange = () => { pref.sort = sortSel.value; save(); render(); };
+
+  function make(p) {
+    const open = () => location.hash = "#/phone/" + encodeURIComponent(p.id);
+    const scr = h("div", { class: "scr" });
+    const thumb = h("div", { class: "thumb", title: "Open " + p.name, onclick: open }, scr);
+    const title = h("div", { class: "dname" });
+    const meta = h("div", { class: "meta dmodel" });
+    const st = h("div", { class: "meta state" });
+    const stats = h("div", { class: "meta dstats" });
+    const row = h("div", { class: "row" });
+    const list = pref.view === "list";
+    const el = list
+      ? h("div", { class: "drow" }, thumb, h("div", { class: "dinfo" }, title, meta), st, stats, row)
+      : h("div", { class: "card" }, thumb, title, meta, h("div", { class: "dline" }, st, stats), row);
+    return { el, scr, thumb, title, meta, st, stats, row, img: h("img", { alt: "" }), loading: false, open };
+  }
+
+  function update(c, p) {
+    c.title.textContent = p.name;
+    c.title.title = p.name;
+    c.meta.textContent = `${p.model} · ${p.os}`;
+    c.meta.title = c.meta.textContent;
+    if (Array.isArray(p.screen) && p.screen[0] > 0 && p.screen[1] > 0) c.scr.style.setProperty("--arn", String(p.screen[0] / p.screen[1]));
+    c.scr.className = "scr k-" + kindOf(p);
+    const running = p.state === "running" || p.state === "starting";
+    c.st.replaceChildren(h("span", { class: "dot " + p.state }), p.state);
+    c.stats.textContent = p.state === "running" && p.memory_mb ? `${Math.round(p.memory_mb)} MB · ${Math.round(p.cpu_pct || 0)}% CPU` : "";
+    if (running && !c.loading) {
+      c.loading = true;
+      const im = new Image();
+      im.onload = () => { c.img.src = im.src; if (!c.img.isConnected) c.scr.replaceChildren(c.img); c.loading = false; };
+      im.onerror = () => { c.loading = false; };
+      im.src = withToken(`/api/phones/${encodeURIComponent(p.id)}/thumb.jpg?w=${pref.view === "list" ? 120 : 320}&n=${n}`);
+    } else if (!running) {
+      c.scr.replaceChildren(h("span", { class: "off", text: p.installed ? "Off" : "No runtime" }));
+    }
+    const key = p.state + control;
+    if (c.row.dataset.k !== key) {
+      c.row.dataset.k = key;
+      c.row.replaceChildren(...[
+        h("button", { class: "btn small primary", text: "Open", onclick: c.open }),
+        control && p.state === "off" && p.installed ? h("button", { class: "btn small", text: "Start", onclick: (e) => act(e, p.id, "start") }) : null,
+        control && running ? h("button", { class: "btn small danger", text: "Stop", onclick: (e) => act(e, p.id, "stop") }) : null,
+        control ? h("button", { class: "btn small", text: "Share", onclick: () => openShare(p.id) }) : null].filter(Boolean));
     }
   }
-  const relayout = () => { if (!pending) pending = requestAnimationFrame(layoutMasonry); };
-  const ro = new ResizeObserver(relayout);
-  // the phone's screen proportions: from the list (screen = the panel shown now), then the image's own size
-  function setAspect(c, w, hh) {
-    if (!(w > 0 && hh > 0)) return;
-    const ar = `${w} / ${hh}`;
-    if (c.ar === ar) return;
-    c.ar = ar;
-    c.thumb.style.setProperty("--ar", ar);
-    c.thumb.classList.add("sized");
+
+  function render() {
+    const q = pref.q.trim().toLowerCase();
+    const counts = { all: phones.length };
+    for (const p of phones) counts[kindOf(p)] = (counts[kindOf(p)] || 0) + 1;
+    if (!KINDS.some(([k]) => k === pref.kind) || (pref.kind !== "all" && !counts[pref.kind])) pref.kind = "all";
+    chips.replaceChildren(...KINDS.filter(([k]) => k === "all" || counts[k]).map(([k, t]) =>
+      h("button", { class: "chip" + (pref.kind === k ? " on" : ""), "aria-pressed": pref.kind === k ? "true" : "false",
+        onclick: () => { pref.kind = k; save(); render(); } }, t, h("span", { class: "n", text: String(counts[k] || 0) }))));
+    const shown = phones.filter((p) => (pref.kind === "all" || kindOf(p) === pref.kind) &&
+      (!q || p.name.toLowerCase().includes(q) || p.model.toLowerCase().includes(q)));
+    const sort = sorters[pref.sort] || byName;
+    const isOn = (p) => p.state !== "off";
+    const groups = [[secRun, shown.filter(isOn).sort(sort)], [secOff, shown.filter((p) => !isOn(p)).sort(sorters[pref.sort === "kind" ? "kind" : "name"])]];
+    for (const [sec, list] of groups) {
+      sec.hidden = !list.length;
+      sec.querySelector(".count").textContent = String(list.length);
+      const box = sec.lastChild;
+      for (const p of list) {
+        let c = cards.get(p.id);
+        if (!c) { c = make(p); cards.set(p.id, c); }
+        update(c, p);
+        box.append(c.el);  // moves it into order (and across sections when it starts / stops)
+      }
+    }
+    for (const [id, c] of cards) if (!shown.some((p) => p.id === id)) { c.el.remove(); if (!phones.some((p) => p.id === id)) cards.delete(id); }
+    empty.hidden = shown.length > 0;
+    empty.textContent = !phones.length ? "No phones yet. Make one in the x86Sim launcher or with `x86sim device create`."
+      : "No phone matches the search or the device type.";
   }
-  const control = ME.role === "control";
+
   async function tick() {
     if (!alive) return;
-    let phones = [];
-    try { phones = await api("/api/phones"); } catch (e) { if (e.status === 401) return boot(); }
+    try { phones = await api("/api/phones"); } catch (e) { if (e.status === 401) return boot(); return; }
     if (!alive) return;
-    if (!phones.length) grid.replaceChildren(h("div", { class: "empty", text: "No phones yet. Make one in the x86Sim launcher or with `x86sim device create`." }));
-    else if (grid.querySelector(".empty")) grid.replaceChildren();
     n++;
-    for (const p of phones) {
-      let c = cards.get(p.id);
-      if (!c) {
-        const img = h("img", { alt: "" });
-        const thumb = h("div", { class: "thumb" + (p.platform === "tvos" || p.platform === "xros" ? " wide" : p.platform === "watchos" ? " round" : ""), title: "Open", onclick: () => location.hash = "#/phone/" + encodeURIComponent(p.id) });
-        const title = h("h3");
-        const meta = h("div", { class: "meta" });
-        const st = h("div", { class: "meta state" });
-        const row = h("div", { class: "row" });
-        c = { el: h("div", { class: "card" }, thumb, title, meta, st, row), img, thumb, title, meta, st, row, loading: false };
-        cards.set(p.id, c);
-        grid.append(c.el);
-        ro.observe(c.el);
-      }
-      if (Array.isArray(p.screen)) setAspect(c, p.screen[0], p.screen[1]);
-      c.title.textContent = p.name;
-      c.meta.textContent = `${p.model} · ${p.os}`;
-      const running = p.state === "running" || p.state === "starting";
-      c.st.replaceChildren(h("span", { class: "dot " + p.state }), p.state + (p.state === "running" && p.memory_mb ? ` · ${Math.round(p.memory_mb)} MB · ${Math.round(p.cpu_pct || 0)}% CPU` : ""));
-      if (running && !c.loading) {
-        c.loading = true;
-        const im = new Image();
-        im.onload = () => { setAspect(c, im.naturalWidth, im.naturalHeight); c.img.src = im.src; if (!c.img.isConnected) c.thumb.replaceChildren(c.img); c.loading = false; };
-        im.onerror = () => { c.loading = false; };
-        im.src = withToken(`/api/phones/${encodeURIComponent(p.id)}/thumb.jpg?w=320&n=${n}`);
-      } else if (!running) {
-        c.thumb.replaceChildren(p.installed ? "Off" : "Runtime not installed");
-      }
-      const key = p.state + control;
-      if (c.row.dataset.k !== key) {
-        c.row.dataset.k = key;
-        c.row.replaceChildren(...[
-          h("button", { class: "btn small primary", text: "Open", onclick: () => location.hash = "#/phone/" + encodeURIComponent(p.id) }),
-          control && p.state === "off" && p.installed ? h("button", { class: "btn small", text: "Start", onclick: (e) => act(e, p.id, "start") }) : null,
-          control && (p.state === "running" || p.state === "starting") ? h("button", { class: "btn small danger", text: "Stop", onclick: (e) => act(e, p.id, "stop") }) : null,
-          control ? h("button", { class: "btn small", text: "Share", onclick: () => openShare(p.id) }) : null].filter(Boolean));
-      }
-    }
-    for (const [id, c] of cards) if (!phones.some((p) => p.id === id)) { ro.unobserve(c.el); c.el.remove(); cards.delete(id); }
-    relayout();
+    render();
   }
   async function act(e, id, what) {
     e.target.disabled = true;
@@ -186,9 +240,10 @@ function dashboard() {
     catch (err) { toast(err.message); e.target.disabled = false; }
     tick();
   }
+  setView(pref.view === "list" ? "list" : "grid");
   tick();
   const iv = setInterval(tick, 2000);
-  return () => { alive = false; clearInterval(iv); ro.disconnect(); if (pending) cancelAnimationFrame(pending); };
+  return () => { alive = false; clearInterval(iv); };
 }
 
 // ---------- HID key codes (physical keys, US layout on the phone) ----------
