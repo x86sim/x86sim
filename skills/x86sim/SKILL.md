@@ -158,8 +158,10 @@ x86sim debug qa com.example.myapp --launch --symbols MyApp.app.dSYM --batch \
 ```
 
 MCP: `debug_start {app, launch?, symbols?}`, then `debug_command {command}` (any lldb command; `continue` / `next` wait
-up to `timeout_s` for the next stop), `debug_stop`. C and Objective-C variables and expressions work; Swift values do
-not (upstream lldb), Swift frames are symbolized. `objc_msgSend` and libsystem functions run natively: breakpoints
+up to `timeout_s` for the next stop), `debug_stop`. C, Objective-C and Swift work: with the Swift toolchain's lldb
+(set up on the first debug, or `x86sim dev setup lldb`; `debug_start` answers `"swift": true`) `frame variable`, `po`
+and `expression` show Swift values (pass the app's dSYM for `po` / `expression`). Without it, /usr/bin/lldb: Swift
+values only as raw memory. `objc_msgSend` and libsystem functions run natively: breakpoints
 there never hit. Always `detach` / `debug_stop`: a stopped app stays stopped.
 
 ## 6c. Profile CPU use
