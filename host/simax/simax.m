@@ -1383,6 +1383,18 @@ static id up_of(id o) {
 	return c;
 }
 
+// The app's own front window for an action without an element: the key window, else the front one with a view
+// controller that is not UIKit's keyboard (on iPad the keyboard's / input assistant's windows stay above the app's even
+// with a hardware keyboard, and escape / magic tap went to them: "nothing took it")
+static UIWindow* app_window(void) {
+	NSArray<UIWindow*>* wins = visible_windows();
+	for (UIWindow* w in [wins reverseObjectEnumerator])
+		if (w.isKeyWindow && w.rootViewController) return w;
+	for (UIWindow* w in [wins reverseObjectEnumerator])
+		if (w.rootViewController && ![NSStringFromClass([w class]) containsString:@"Keyboard"]) return w;
+	return wins.lastObject;
+}
+
 static NSDictionary* perform_action(NSDictionary* req) {
 	NSString* name = req[@"name"] ?: @"activate";
 	NSString* oid = req[@"oid"];
@@ -1396,7 +1408,7 @@ static NSDictionary* perform_action(NSDictionary* req) {
 	BOOL chain = [name isEqualToString:@"escape"] || [name isEqualToString:@"magic_tap"];
 	if (!e && chain) {
 		e = first_responder();
-		if (!e) e = visible_windows().lastObject.rootViewController.view ?: visible_windows().lastObject;
+		if (!e) e = app_window().rootViewController.view ?: app_window();
 	}
 	if (!e) return @{ @"error": @"no element (oid)" };
 	NSMutableDictionary* r = [NSMutableDictionary dictionaryWithDictionary:@{ @"name": name }];
@@ -1462,7 +1474,7 @@ static NSDictionary* perform_action(NSDictionary* req) {
 		if (!ok && esc && !oid.length) {
 			UIViewController* best = nil;
 			NSMutableArray* q = [NSMutableArray array];
-			UIViewController* root = visible_windows().lastObject.rootViewController;
+			UIViewController* root = app_window().rootViewController;
 			if (root) [q addObject:root];
 			for (int n = 0; q.count && n < 400; n++) {
 				UIViewController* c = q[0];
