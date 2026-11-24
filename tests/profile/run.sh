@@ -7,15 +7,18 @@
 #    on its stacks, the worker thread is named, the main thread shows UIKit / QuartzCore work; speedscope and gecko
 #    files are well-formed (same samples as the text summary)
 # 2. (--settings) Settings scrolled while profiled: UIKitCore frames, the main thread on top
-# Every check prints "X86TEST profile <check> PASS|FAIL"; exit status 1 if one failed. Output in $X86SIM_SCRATCH/profile-test/.
+# Every check prints "X86TEST profile <check> PASS|FAIL"; exit status 1 if one failed. Output in $X86SIM_SCRATCH/profile-test[-<platform>]/.
 X86SIM_ROOT=${X86SIM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}; . "$X86SIM_ROOT/cli/lib/config.sh"
 build=1 settings=0 standalone=0 PHONE=
 for a; do case $a in --no-build) build=0 ;; --settings) settings=1 ;; --standalone) standalone=1 ;; -*) ;; *) PHONE=$a ;; esac; done
 [ -n "$PHONE" ] || [ $standalone = 1 ] || { echo "usage: $0 PHONE [--no-build] [--settings] | --standalone" >&2; exit 2; }
 X=$X86SIM_ROOT/cli/x86sim
 SERVE=${X86SIM_SERVE:-$X86SIM_ROOT/tools/launcher/target/release/x86sim-serve}
-OUT=$X86SIM_SCRATCH/profile-test; mkdir -p "$OUT"
-[ $build = 1 ] && { "$X86SIM_ROOT/tests/profile/build.sh" >&2 || exit 1; }
+. "$(dirname "$0")/../apps/platform.sh"
+plat=ios; [ -n "$PHONE" ] && plat=$(phone_platform "$PHONE")
+X86SIM_PLATFORM=$plat . "$(dirname "$0")/../apps/platform.sh"  # PSUF: the phone's build of profapp (tvOS, watchOS, visionOS)
+OUT=$X86SIM_SCRATCH/profile-test$PSUF; mkdir -p "$OUT"
+[ $build = 1 ] && { X86SIM_PLATFORM=$plat "$(dirname "$0")/build.sh" >&2 || exit 1; }
 fail=0
 check() {  # check NAME FILE REGEX...: every regex is found in FILE
 	local name=$1 f=$2; shift 2
@@ -70,13 +73,13 @@ if [ $standalone = 1 ]; then
 fi
 
 P() { "$X" --phone "$PHONE" "$@"; }
-P install "$X86SIM_SCRATCH/apps/profapp.app" >&2 || exit 1
+P install "$X86SIM_SCRATCH/apps/profapp$PSUF.app" >&2 || exit 1
 P launch --terminate-running-process com.x86sim.test.profapp >&2 || exit 1
 sleep 6
 X86SIM_SERVE=$SERVE timeout 120 "$X" profile "$PHONE" com.x86sim.test.profapp --secs 5 --format text --out "$OUT/profapp.txt" > "$OUT/profapp.cli" 2>&1
 top_self app-top "$OUT/profapp.txt" prof_leaf
 check app-stack "$OUT/profapp.txt" "prof_hot " "prof_round " "prof_worker " "prof\.worker \(tid"
-check app-main "$OUT/profapp.txt" "main \(tid" "\[(UIKitCore|QuartzCore|CoreFoundation)\]"
+check app-main "$OUT/profapp.txt" "main \(tid" "\[(UIKitCore|QuartzCore|CoreFoundation|Foundation)\]"
 formats "$(raw_of "$OUT/profapp.cli")" profapp prof_leaf
 P terminate com.x86sim.test.profapp >/dev/null 2>&1
 

@@ -103,13 +103,15 @@ final class BadVC: UIViewController {
         view.addSubview(box)
         y += 54
 
-        // fine: an adjustable slider (ax_action increment / decrement) and an element with custom actions
+        // fine: an adjustable slider (ax_action increment / decrement; tvOS has no UISlider) and an element with custom actions
+        #if !os(tvOS)
         let s = UISlider(frame: CGRect(x: 20, y: y, width: w - 40, height: 44))
         s.minimumValue = 0; s.maximumValue = 10; s.value = 5
         s.accessibilityLabel = "Volume"
         s.addAction(UIAction { [weak self, weak s] _ in self?.note("volume \(Int(s?.value ?? 0))") }, for: .valueChanged)
         view.addSubview(s)
         y += 54
+        #endif
 
         let msg = UIView(frame: CGRect(x: 20, y: y, width: w - 40, height: 50))
         msg.backgroundColor = UIColor(white: 0.95, alpha: 1)

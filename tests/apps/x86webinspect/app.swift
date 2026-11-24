@@ -1,8 +1,14 @@
 // x86webinspect: two WKWebViews for Web Inspector checks (x86sim inspect, MCP web_*): one with isInspectable = true
 // (listed by webinspectord, as in Apple's simulator), one without (not listed). The inspectable page logs to the
 // console, fetches X86WI_URL's data.json when given (default http://127.0.0.1:28743/), and sets its title.
+// tvOS has no WebKit (no WKWebView, no Safari): there the app has an inspectable JSContext named "x86webinspect"
+// (Web Inspector lists JSContexts of tvOS apps in Apple's simulator too) that logs and sets appValue every second.
 import SwiftUI
+#if canImport(WebKit)
 import WebKit
+#else
+import JavaScriptCore
+#endif
 
 let page = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width"><title>%TITLE%</title></head>
@@ -14,6 +20,7 @@ fetch("data.json").then(r => r.json()).then(j => console.log("x86webinspect fetc
 </script></body></html>
 """
 
+#if canImport(WebKit)
 struct Web: UIViewRepresentable {
     let title: String
     let inspectable: Bool
@@ -36,6 +43,25 @@ struct Web: UIViewRepresentable {
     func updateUIView(_: WKWebView, context: Context) {}
 }
 
+#else
+final class JSHost {
+    static let shared = JSHost()
+    let ctx = JSContext()!
+    var n = 0
+    init() {
+        ctx.name = "x86webinspect"
+        ctx.isInspectable = true
+        ctx.evaluateScript("var appValue = 6 * 7; function tick(n) { console.log('x86webinspect tick ' + n); return n; }")
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.n += 1
+            self.ctx.evaluateScript("tick(\(self.n))")
+        }
+        X86Test.log("jscontext", true, "inspectable=\(ctx.isInspectable)")
+    }
+}
+#endif
+
 @main
 struct X86WebInspectApp: App {
     init() { X86Test.reset() }
@@ -43,8 +69,12 @@ struct X86WebInspectApp: App {
         WindowGroup {
             VStack(alignment: .leading) {
                 Text("x86webinspect").font(.largeTitle).bold()
+                #if canImport(WebKit)
                 Web(title: "Inspectable", inspectable: true).border(.gray)
                 Web(title: "Hidden", inspectable: false).border(.gray)
+                #else
+                Text("JSContext x86webinspect").onAppear { _ = JSHost.shared }
+                #endif
             }.padding()
         }
     }

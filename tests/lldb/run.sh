@@ -6,15 +6,21 @@
 # 2. attach to the running dbgapp: thread list, bt all, break on dbg_work (the worker thread), read round; break in
 #    UIKitCore (-[UILabel setText:], AOT-translated code); detach
 # 3. (--settings) attach to Settings (com.apple.Preferences, launched first): bt all; detach
-# Every check prints "X86TEST lldb <check> PASS|FAIL"; exit status 1 if one failed. Output in $X86SIM_SCRATCH/lldb-test/.
+# On every platform: the phone's (tvOS, watchOS, visionOS) build of dbgapp (build-app.sh X86SIM_PLATFORM); on watchOS
+# the AOT breakpoint is CoreFoundation's CFStringCreateWithFormatAndArguments (no UILabel there).
+# Every check prints "X86TEST lldb <check> PASS|FAIL"; exit status 1 if one failed. Output in $X86SIM_SCRATCH/lldb-test[-<platform>]/.
 X86SIM_ROOT=${X86SIM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}; . "$X86SIM_ROOT/cli/lib/config.sh"
 PHONE=$1; shift || { echo "usage: $0 PHONE [--no-build] [--settings]" >&2; exit 2; }
 build=1 settings=0
 for a; do case $a in --no-build) build=0 ;; --settings) settings=1 ;; esac; done
 X=$X86SIM_ROOT/cli/x86sim
-OUT=$X86SIM_SCRATCH/lldb-test; mkdir -p "$OUT"
-APP=$X86SIM_SCRATCH/apps/dbgapp.app
-[ $build = 1 ] && { "$X86SIM_ROOT/tests/lldb/build-app.sh" >&2 || exit 1; }
+. "$(dirname "$0")/../apps/platform.sh"
+plat=$(phone_platform "$PHONE"); X86SIM_PLATFORM=$plat . "$(dirname "$0")/../apps/platform.sh"
+OUT=$X86SIM_SCRATCH/lldb-test$PSUF; mkdir -p "$OUT"
+APP=$X86SIM_SCRATCH/apps/dbgapp$PSUF.app
+[ $build = 1 ] && { X86SIM_PLATFORM=$plat "$(dirname "$0")/build-app.sh" >&2 || exit 1; }
+AOTBP="-[UILabel setText:]" AOTRE="UIKitCore\`-\[UILabel setText:\]" MAINRE=UIApplicationMain
+[ "$plat" = watchos ] && AOTBP=CFStringCreateWithFormatAndArguments AOTRE="CoreFoundation\`CFStringCreateWithFormatAndArguments" MAINRE=WKApplicationMain
 P() { "$X" --phone "$PHONE" "$@"; }
 P install "$APP" >&2 || exit 1
 fail=0
@@ -23,7 +29,7 @@ check() {  # check NAME FILE REGEX...: every regex is found in FILE
 	for re; do grep -qE -- "$re" "$f" || { echo "X86TEST lldb $name FAIL (no /$re/ in $f)"; fail=1; return; }; done
 	echo "X86TEST lldb $name PASS"
 }
-DS=$X86SIM_SCRATCH/apps/dbgapp.app.dSYM
+DS=$APP.dSYM
 # 1. launched stopped
 timeout 300 "$X" --phone "$PHONE" debug com.x86sim.test.dbgapp --launch --symbols "$DS" --batch \
 	-o "breakpoint set -n dbg_tick" -o "continue" -o "bt" -o "frame variable n" -o "next" -o "next" -o "next" \
@@ -40,13 +46,13 @@ P pidof com.x86sim.test.dbgapp > /dev/null && echo "X86TEST lldb runs-after-deta
 # 2. attach to the running app
 timeout 300 "$X" --phone "$PHONE" debug com.x86sim.test.dbgapp --symbols "$DS" --batch \
 	-o "thread list" -o "bt all" -o "breakpoint set -n dbg_work" -o "continue" -o "frame variable round" -o "thread info" \
-	-o "breakpoint delete -f" -o "breakpoint set -n '-[UILabel setText:]'" -o "continue" -o "bt 4" \
+	-o "breakpoint delete -f" -o "breakpoint set -n '$AOTBP'" -o "continue" -o "bt 4" \
 	-o "breakpoint delete -f" -o "detach" > "$OUT/attach.txt" 2>&1
 check attach "$OUT/attach.txt" "stop reason = signal SIGSTOP" "thread #2"
-check bt-all "$OUT/attach.txt" "UIApplicationMain" "dbgapp\`worker"
+check bt-all "$OUT/attach.txt" "$MAINRE" "dbgapp\`worker"
 check worker-breakpoint "$OUT/attach.txt" "dbgapp\`dbg_work\(round=[0-9]+\)" "\(long\) round = [0-9]+"
-# UIKitCore's code comes from the AOT image: its blocks must be dropped for the breakpoint (gdbstub.cpp bp_set)
-check aot-breakpoint "$OUT/attach.txt" "UIKitCore\`-\[UILabel setText:\]" "stop reason = breakpoint 2\.1"
+# UIKitCore's (CoreFoundation's) code comes from the AOT image: its blocks must be dropped for the breakpoint (gdbstub.cpp bp_set)
+check aot-breakpoint "$OUT/attach.txt" "$AOTRE" "stop reason = breakpoint 2\.1"
 check detach2 "$OUT/attach.txt" "Process [0-9]+ detached"
 # 3. Settings
 if [ $settings = 1 ]; then
