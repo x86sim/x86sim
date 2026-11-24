@@ -1585,6 +1585,10 @@ fn scroll_into_view(inst: &Instance, e: &El) -> Result<()> {
 pub fn type_text(inst: &Instance, text: &str, clear: bool, submit: bool, keys: bool, after: After) -> Result<Outcome> {
     let before = last(inst);
     if keys {
+        // clear: the field emptied by the app first (as without keys), then the key presses
+        if clear {
+            type_in_app(inst, &json!({"op": "type", "text": "", "clear": true, "submit": false}))?;
+        }
         let mut h = Hid::new(&inst.sock);
         for c in text.chars() {
             let (u, shift) = key_usage(c).ok_or_else(|| anyhow!("no US key for {c:?} (type without keys)"))?;
@@ -1604,28 +1608,38 @@ pub fn type_text(inst: &Instance, text: &str, clear: bool, submit: bool, keys: b
         }
         return Ok(outcome(inst, format!("typed {} keys", text.chars().count()), before, after));
     }
-    let req = json!({"op": "type", "text": text, "clear": clear, "submit": submit});
-    // the process with a focused text field takes it: apps first, SpringBoard (Spotlight, alerts' fields) last
-    let mut eps: Vec<PathBuf> = endpoints(inst).into_iter().filter(|e| e.fg).map(|e| e.sock).collect();
-    let sb_pid = last(inst).and_then(|s| s.elements.iter().find(|e| e.app == SPRINGBOARD).map(|e| e.pid));
-    eps.sort_by_key(|p| Some(pid_of_sock(p)) == sb_pid);
-    let mut why = String::from("no app on screen");
-    for p in eps {
-        match ask(&p, &req, Duration::from_secs(4)) {
-            Ok(Some(v)) if v["error"].is_null() => {
-                let did = format!(
-                    "typed {} into {}{}",
-                    quote(text),
-                    v["field"].as_str().unwrap_or("the focused field"),
-                    v["value"].as_str().map(|s| format!(" (now {})", quote(s))).unwrap_or_default()
-                );
-                return Ok(outcome(inst, did, before, after));
+    let v = type_in_app(inst, &json!({"op": "type", "text": text, "clear": clear, "submit": submit}))?;
+    let did = format!(
+        "typed {} into {}{}",
+        quote(text),
+        v["field"].as_str().unwrap_or("the focused field"),
+        v["value"].as_str().map(|s| format!(" (now {})", quote(s))).unwrap_or_default()
+    );
+    Ok(outcome(inst, did, before, after))
+}
+
+/// A type request to the process with the focused text field: apps first, SpringBoard (Spotlight, alerts' fields)
+/// last. Answers that process's answer. No focused field yet: asked again for up to 3 s (a tap on an Apple Watch text
+/// field brings up the input sheet, QuickboardViewService, a second later in its own process).
+fn type_in_app(inst: &Instance, req: &Value) -> Result<Value> {
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut eps: Vec<PathBuf> = endpoints(inst).into_iter().filter(|e| e.fg).map(|e| e.sock).collect();
+        let sb_pid = last(inst).and_then(|s| s.elements.iter().find(|e| e.app == SPRINGBOARD).map(|e| e.pid));
+        eps.sort_by_key(|p| Some(pid_of_sock(p)) == sb_pid);
+        let mut why = String::from("no app on screen");
+        for p in eps {
+            match ask(&p, req, Duration::from_secs(4)) {
+                Ok(Some(v)) if v["error"].is_null() => return Ok(v),
+                Ok(Some(v)) => why = v["error"].as_str().unwrap_or("").to_string(),
+                _ => {}
             }
-            Ok(Some(v)) => why = v["error"].as_str().unwrap_or("").to_string(),
-            _ => {}
         }
+        if Instant::now() >= until || !why.starts_with("no focused text field") {
+            bail!("cannot type: {why}")
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
-    bail!("cannot type: {why}")
 }
 
 /// HID usage (keyboard page) and shift for a character, US layout
