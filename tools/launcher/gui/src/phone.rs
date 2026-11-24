@@ -20,7 +20,7 @@ fn toolbar_w(platform: &str) -> f32 {
 }
 const GESTURES: &str ="Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nF1 Home · F2 Lock · F3/F4 volume\nCtrl+K software keyboard · Ctrl+Shift+K hardware keyboard";
 /// Models 2: a two-screen phone's 3D view adds its own controls
-const GESTURES_DUO: &str = "Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nRight-drag (or Alt + drag) turns the phone; scroll with the right button held (or Alt) zooms; double right-click resets the view.\nF1 Home · F2 Lock · F3/F4 volume\nCtrl+K software keyboard · Ctrl+Shift+K hardware keyboard";
+const GESTURES_DUO: &str = "Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nRight-drag (or Alt + drag) turns the device; scroll with the right button held (or Alt) zooms; double right-click resets the view.\nF1 Home · F2 Lock · F3/F4 volume\nCtrl+K software keyboard · Ctrl+Shift+K hardware keyboard";
 const GESTURES_TV: &str = "The keyboard is the remote: arrow keys move, Return selects, Esc goes back.\nClick the screen or the clickpad's centre to select; the wheel over either moves the focus.\nF1 TV (home) · F2 play / pause · F3/F4 volume";
 const GESTURES_WATCH: &str = "Click the screen to tap, drag to swipe.\nThe mouse wheel (over the screen or the crown) or a drag on the crown turns it; a click on the crown presses it.\nF1 presses the crown (watch face / apps) · F2 sleeps / wakes the screen; the side button opens Control Center";
 
@@ -267,7 +267,7 @@ impl App {
         let off = phase == Phase::Off;
         let can = off && !inst.is_default;
         let r = menu_row(ui, icon::TRASH, "Remove device…", "Del", can, true);
-        let r = if inst.is_default { r.on_disabled_hover_text("The main phone stays") } else if !off { r.on_disabled_hover_text("Stop it first") } else { r };
+        let r = if inst.is_default { r.on_disabled_hover_text("The main device stays") } else if !off { r.on_disabled_hover_text("Stop it first") } else { r };
         if r.clicked() {
             self.ask_remove(inst, ui.ctx());
             ui.close();
@@ -1069,7 +1069,7 @@ impl App {
             s.jobs = opts[i].0.into();
             save = true;
         }
-        field(ui, "Memory cap", "X86SIM_MEM_MAX for this phone's processes (systemd MemoryMax), e.g. 6G. Empty: no cap.");
+        field(ui, "Memory cap", "X86SIM_MEM_MAX for this device's processes (systemd MemoryMax), e.g. 6G. Empty: no cap.");
         if ui.add(egui::TextEdit::singleline(&mut s.mem_max).hint_text(egui::RichText::new("No cap").color(pal().ink_3)).desired_width(120.0).margin(egui::Margin::symmetric(8, 6))).lost_focus() {
             save = true;
         }

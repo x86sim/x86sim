@@ -1,4 +1,4 @@
-// x86Sim share page: the Accessibility Inspector (as Xcode's): point at an element on the phone's screen to see its
+// x86Sim share page: the Accessibility Inspector (as Xcode's): point at an element on the device's screen to see its
 // frame and properties, perform its accessibility actions, run the audit. Routes: ../axapi.rs. app.js's phoneView calls
 // AXI.attach() and puts panel() in its side bar.
 "use strict";
@@ -23,7 +23,7 @@ window.AXI = (() => {
       h("div", { class: "btns" }, inspectBtn, auditBtn),
       h("div", { class: "axopts" },
         h("label", { title: "Draw every element's frame" }, allBox, " all frames"),
-        control ? h("label", { title: "Also re-check at the largest accessibility text size (the phone's text size changes for a few seconds, then goes back)" }, dynBox, " Dynamic Type") : null),
+        control ? h("label", { title: "Also re-check at the largest accessibility text size (the device's text size changes for a few seconds, then goes back)" }, dynBox, " Dynamic Type") : null),
       status, props, list);
 
     const isXr = () => tree?.platform === "xros";

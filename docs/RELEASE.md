@@ -42,10 +42,14 @@ usr/share/x86sim/
                                a64hugecopy, arm64host — 543 MB unpacked
   bin/ipsw (MIT), bin/7zz + 7z (7-Zip, LGPL-2.1 + unRAR), bin/rcodesign (MPL-2.0: re-signs converted .ipa / device
                                builds), pylib/dns (dnspython, ISC)
+  webinspector/                WebKit's Web Inspector frontend for `x86sim inspect` (build/webinspector.sh: the
+                               WebInspectorUI files of Arch's webkit2gtk-4.1 2.54.3-1 package, sha256 pinned; BSD-2 + MIT,
+                               its LICENSE); AppRun copies it to <app>/webinspector. 227 files, 6.3 MiB unpacked;
+                               +1.19 MiB on the AppImage (zstd squashfs: 236.1 -> 237.4 MB, +0.5%), 2026-11-24
   install-helper.sh            the privileged step (system mode)
   darling-userns.sh            the no-root Darling wrapper (userns mode)
   licenses/                    Darling (GPL-3 / APSL parts), dynarmic (0BSD), metal2vulkan (GPL-2+/LGPL-3+), astcenc (Apache-2),
-                               lzfse (BSD-3), omarchy-apple-dev (MIT); NOTICE lists them all
+                               lzfse (BSD-3), omarchy-apple-dev (MIT), webinspector (BSD-2 + MIT); NOTICE lists them all
 ```
 
 The committed simulator-side binaries in `host/` (simfb, simhid, simshim, simaudio frameworks/dylibs) are **ours**,
@@ -135,7 +139,8 @@ it stays in the sidebar afterwards. The same steps from a terminal: `x86sim.AppI
   `ZERO_AR_DATE=1` (ld64's N_OSO object timestamps) and `SOURCE_DATE_EPOCH` = Darling's commit time (`__DATE__`), so
   the same Darling source gives the same `DARLING_ID` and an update reinstalls Darling only when it changed (before
   2026-11-24 every build had a new id: 0.5.0 and 0.5.1, same Darling, `0caec06c…` vs `67543ed4…`).
-- `build/release/appimage.sh`: payload, Darling tree, pinned tools (sha256 checked), licenses, Apple-content check,
+- `build/release/appimage.sh`: payload, Darling tree, pinned tools (sha256 checked), the Web Inspector frontend
+  (`build/webinspector.sh`: needs `zstd` and glib's `gresource`, in deps-ubuntu.sh), licenses, Apple-content check,
   appimagetool (continuous; prints its hash) → `x86sim-<version>-x86_64.AppImage` + `.zsync` + `SHA256SUMS`.
 - `build/release/docker-build.sh`: the same in an `ubuntu:24.04` container with the checkout mounted read-only (local
   check of the CI build).
@@ -162,7 +167,9 @@ Fedora 39+, Arch/derivatives; not Ubuntu 22.04 / Debian 12. Mac-side bits are Ma
 
 Darling: GPL-3.0 with APSL-2.0 / BSD parts (Apple's open-source releases) — source is our public fork; the release
 notes should point at the exact submodule commits (GPL offer). dynarmic 0BSD, metal2vulkan GPL-2.0+/LGPL-3.0+ (dual),
-astc-encoder Apache-2.0, lzfse BSD-3, ipsw MIT, 7-Zip LGPL-2.1 + unRAR restriction (redistribution fine), dnspython ISC.
+astc-encoder Apache-2.0, lzfse BSD-3, ipsw MIT, 7-Zip LGPL-2.1 + unRAR restriction (redistribution fine), dnspython ISC,
+Web Inspector frontend BSD-2 (WebKit's WebInspectorUI; bundled CodeMirror MIT, Esprima BSD-2, three.js MIT, CSS
+documentation MIT: licenses/webinspector-LICENSE). Only the frontend's files ship, none of WebKitGTK's LGPL libraries.
 Our own code: GPL-3.0-or-later (LICENSE); bundled components and their licenses in NOTICE.
 
 ## 8. Decisions (2026-11-08)

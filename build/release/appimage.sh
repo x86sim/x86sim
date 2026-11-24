@@ -6,7 +6,8 @@
 #              zsync); "none" for no update info
 # Nothing from Apple goes in: the payload is `git ls-files` of our own dirs (the committed simulator-side binaries are
 # ours, built from host/ sources) plus build outputs; check_no_apple below refuses a tree with Apple runtime/SDK files.
-# Third-party tools are downloaded pinned (sha256 checked): ipsw (MIT), 7-Zip's 7zz (LGPL-2.1 + unRAR), dnspython (ISC).
+# Third-party tools are downloaded pinned (sha256 checked): ipsw (MIT), 7-Zip's 7zz (LGPL-2.1 + unRAR), dnspython (ISC),
+# and WebKit's Web Inspector frontend (BSD-2 + MIT, from a pinned WebKitGTK package: build/webinspector.sh).
 set -e
 X=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=$(cd "${OUT:-$X/build/release/out}" && pwd)
@@ -89,6 +90,9 @@ ln -s 7zz "$S/bin/7z"
 DNS_URL=$(curl -fsSL "https://pypi.org/pypi/dnspython/$DNS_VER/json" | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["filename"].endswith(".whl")))')
 fetch "$DNS_URL" dnspython.whl "$DNS_SHA"
 python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$DL/dnspython.whl" "$S/pylib"
+# x86sim inspect's frontend (share/inspect.rs), so the AppImage needs no WebKitGTK; AppRun copies it next to the payload
+WEBINSPECTOR_DL=$DL "$X/build/webinspector.sh" "$OUT/webinspector"
+cp -a "$OUT/webinspector" "$S/webinspector"
 
 echo "== licenses"
 mkdir -p "$S/licenses"
@@ -99,6 +103,7 @@ cp "$X/linux/arm64jit/third_party/astcenc/LICENSE.txt" "$S/licenses/astcenc-LICE
 cp "$X/linux/arm64jit/third_party/lzfse/LICENSE" "$S/licenses/lzfse-LICENSE" 2>/dev/null || true
 cp "$X/LICENSE" "$S/licenses/x86sim-LICENSE"
 cp "$X/external/omarchy-apple-dev/LICENSE" "$S/licenses/omarchy-apple-dev-LICENSE"
+cp "$S/webinspector/LICENSE" "$S/licenses/webinspector-LICENSE"
 cp "$X/NOTICE" "$S/NOTICE"
 
 echo "== Apple content check"

@@ -103,57 +103,136 @@ let currentPhone = null;
 function dashboard() {
   currentPhone = null;
   $("#crumb").textContent = "Phones";
-  document.title = "x86Sim Phones";
-  const grid = h("div", { class: "grid" });
-  main.append(grid);
-  const cards = new Map();
-  let n = 0, alive = true;
+  document.title = "x86Sim Devices";
   const control = ME.role === "control";
-  async function tick() {
-    if (!alive) return;
-    let phones = [];
-    try { phones = await api("/api/phones"); } catch (e) { if (e.status === 401) return boot(); }
-    if (!alive) return;
-    if (!phones.length) grid.replaceChildren(h("div", { class: "empty", text: "No phones yet. Make one in the x86Sim launcher or with `x86sim device create`." }));
-    else if (grid.querySelector(".empty")) grid.replaceChildren();
-    n++;
-    for (const p of phones) {
-      let c = cards.get(p.id);
-      if (!c) {
-        const img = h("img", { alt: "" });
-        const thumb = h("div", { class: "thumb" + (p.platform === "tvos" || p.platform === "xros" ? " wide" : p.platform === "watchos" ? " round" : ""), title: "Open", onclick: () => location.hash = "#/phone/" + encodeURIComponent(p.id) });
-        const title = h("h3");
-        const meta = h("div", { class: "meta" });
-        const st = h("div", { class: "meta state" });
-        const row = h("div", { class: "row" });
-        c = { el: h("div", { class: "card" }, thumb, title, meta, st, row), img, thumb, title, meta, st, row, loading: false };
-        cards.set(p.id, c);
-        grid.append(c.el);
-      }
-      c.title.textContent = p.name;
-      c.meta.textContent = `${p.model} · ${p.os}`;
-      const running = p.state === "running" || p.state === "starting";
-      c.st.replaceChildren(h("span", { class: "dot " + p.state }), p.state + (p.state === "running" && p.memory_mb ? ` · ${Math.round(p.memory_mb)} MB · ${Math.round(p.cpu_pct || 0)}% CPU` : ""));
-      if (running && !c.loading) {
-        c.loading = true;
-        const im = new Image();
-        im.onload = () => { c.img.src = im.src; if (!c.img.isConnected) c.thumb.replaceChildren(c.img); c.loading = false; };
-        im.onerror = () => { c.loading = false; };
-        im.src = withToken(`/api/phones/${encodeURIComponent(p.id)}/thumb.jpg?w=320&n=${n}`);
-      } else if (!running) {
-        c.thumb.replaceChildren(p.installed ? "Off" : "Runtime not installed");
-      }
-      const key = p.state + control;
-      if (c.row.dataset.k !== key) {
-        c.row.dataset.k = key;
-        c.row.replaceChildren(...[
-          h("button", { class: "btn small primary", text: "Open", onclick: () => location.hash = "#/phone/" + encodeURIComponent(p.id) }),
-          control && p.state === "off" && p.installed ? h("button", { class: "btn small", text: "Start", onclick: (e) => act(e, p.id, "start") }) : null,
-          control && (p.state === "running" || p.state === "starting") ? h("button", { class: "btn small danger", text: "Stop", onclick: (e) => act(e, p.id, "stop") }) : null,
-          control ? h("button", { class: "btn small", text: "Share", onclick: () => openShare(p.id) }) : null].filter(Boolean));
+  // what the viewer picked, kept in this browser (a remembered convenience only: the page works without it)
+  const PREF = "x86sim.dash";
+  let pref = { q: "", kind: "all", sort: "name", view: "grid" };
+  try { Object.assign(pref, JSON.parse(localStorage.getItem(PREF) || "{}")); } catch (_) {}
+  const save = () => { try { localStorage.setItem(PREF, JSON.stringify(pref)); } catch (_) {} };
+
+  const KINDS = [["all", "All"], ["iphone", "iPhone"], ["ipad", "iPad"], ["tv", "TV"], ["watch", "Watch"], ["vision", "Vision"]];
+  const kindOf = (p) => p.platform === "tvos" ? "tv" : p.platform === "watchos" ? "watch" : p.platform === "xros" ? "vision" : p.ipad ? "ipad" : "iphone";
+  const KIND_ORDER = { iphone: 0, ipad: 1, tv: 2, watch: 3, vision: 4 };
+  const SORTS = [["name", "Name"], ["kind", "Device type"], ["memory", "Memory"], ["cpu", "CPU"], ["uptime", "Recently started"]];
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  const sorters = {
+    name: byName,
+    kind: (a, b) => KIND_ORDER[kindOf(a)] - KIND_ORDER[kindOf(b)] || byName(a, b),
+    memory: (a, b) => (b.memory_mb || 0) - (a.memory_mb || 0) || byName(a, b),
+    cpu: (a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0) || byName(a, b),
+    uptime: (a, b) => (a.uptime_s ?? Infinity) - (b.uptime_s ?? Infinity) || byName(a, b),
+  };
+
+  // toolbar: search, device types, sort, grid / list
+  const search = h("input", { type: "search", class: "dsearch", placeholder: "Search name or model", value: pref.q, "aria-label": "Search devices" });
+  const chips = h("div", { class: "chips", role: "group", "aria-label": "Device type" });
+  const sortSel = h("select", { "aria-label": "Sort" }, SORTS.map(([v, t]) => h("option", { value: v, text: t, selected: pref.sort === v })));
+  const viewGrid = h("button", { class: "btn small", text: "Grid", title: "Cards" });
+  const viewList = h("button", { class: "btn small", text: "List", title: "Rows" });
+  const bar = h("div", { class: "dashbar" }, search, chips, h("div", { class: "grow" }), h("label", { class: "meta sortlbl" }, "Sort ", sortSel), h("div", { class: "seg" }, viewGrid, viewList));
+  const secRun = h("section", { class: "dsec" }, h("h2", {}, "Running ", h("span", { class: "count" })), h("div"));
+  const secOff = h("section", { class: "dsec" }, h("h2", {}, "Off ", h("span", { class: "count" })), h("div"));
+  const empty = h("div", { class: "empty" });
+  main.append(bar, secRun, secOff, empty);
+
+  const cards = new Map();  // id -> the element of the current view + its parts
+  let phones = [], n = 0, alive = true;
+  function setView(v) {
+    pref.view = v; save();
+    viewGrid.classList.toggle("on", v === "grid"); viewList.classList.toggle("on", v === "list");
+    for (const s of [secRun, secOff]) s.lastChild.className = v === "list" ? "dlist" : "dgrid";
+    for (const c of cards.values()) c.el.remove();
+    cards.clear();
+    render();
+  }
+  viewGrid.onclick = () => setView("grid");
+  viewList.onclick = () => setView("list");
+  search.oninput = () => { pref.q = search.value; save(); render(); };
+  sortSel.onchange = () => { pref.sort = sortSel.value; save(); render(); };
+
+  function make(p) {
+    const open = () => location.hash = "#/phone/" + encodeURIComponent(p.id);
+    const scr = h("div", { class: "scr" });
+    const thumb = h("div", { class: "thumb", title: "Open " + p.name, onclick: open }, scr);
+    const title = h("div", { class: "dname" });
+    const meta = h("div", { class: "meta dmodel" });
+    const st = h("div", { class: "meta state" });
+    const stats = h("div", { class: "meta dstats" });
+    const row = h("div", { class: "row" });
+    const list = pref.view === "list";
+    const el = list
+      ? h("div", { class: "drow" }, thumb, h("div", { class: "dinfo" }, title, meta), st, stats, row)
+      : h("div", { class: "card" }, thumb, title, meta, h("div", { class: "dline" }, st, stats), row);
+    return { el, scr, thumb, title, meta, st, stats, row, img: h("img", { alt: "" }), loading: false, open };
+  }
+
+  function update(c, p) {
+    c.title.textContent = p.name;
+    c.title.title = p.name;
+    c.meta.textContent = `${p.model} · ${p.os}`;
+    c.meta.title = c.meta.textContent;
+    if (Array.isArray(p.screen) && p.screen[0] > 0 && p.screen[1] > 0) c.scr.style.setProperty("--arn", String(p.screen[0] / p.screen[1]));
+    c.scr.className = "scr k-" + kindOf(p);
+    const running = p.state === "running" || p.state === "starting";
+    c.st.replaceChildren(h("span", { class: "dot " + p.state }), p.state);
+    c.stats.textContent = p.state === "running" && p.memory_mb ? `${Math.round(p.memory_mb)} MB · ${Math.round(p.cpu_pct || 0)}% CPU` : "";
+    if (running && !c.loading) {
+      c.loading = true;
+      const im = new Image();
+      im.onload = () => { c.img.src = im.src; if (!c.img.isConnected) c.scr.replaceChildren(c.img); c.loading = false; };
+      im.onerror = () => { c.loading = false; };
+      im.src = withToken(`/api/phones/${encodeURIComponent(p.id)}/thumb.jpg?w=${pref.view === "list" ? 120 : 320}&n=${n}`);
+    } else if (!running) {
+      c.scr.replaceChildren(h("span", { class: "off", text: p.installed ? "Off" : "No runtime" }));
+    }
+    const key = p.state + control;
+    if (c.row.dataset.k !== key) {
+      c.row.dataset.k = key;
+      c.row.replaceChildren(...[
+        h("button", { class: "btn small primary", text: "Open", onclick: c.open }),
+        control && p.state === "off" && p.installed ? h("button", { class: "btn small", text: "Start", onclick: (e) => act(e, p.id, "start") }) : null,
+        control && running ? h("button", { class: "btn small danger", text: "Stop", onclick: (e) => act(e, p.id, "stop") }) : null,
+        control ? h("button", { class: "btn small", text: "Share", onclick: () => openShare(p.id) }) : null].filter(Boolean));
+    }
+  }
+
+  function render() {
+    const q = pref.q.trim().toLowerCase();
+    const counts = { all: phones.length };
+    for (const p of phones) counts[kindOf(p)] = (counts[kindOf(p)] || 0) + 1;
+    if (!KINDS.some(([k]) => k === pref.kind) || (pref.kind !== "all" && !counts[pref.kind])) pref.kind = "all";
+    chips.replaceChildren(...KINDS.filter(([k]) => k === "all" || counts[k]).map(([k, t]) =>
+      h("button", { class: "chip" + (pref.kind === k ? " on" : ""), "aria-pressed": pref.kind === k ? "true" : "false",
+        onclick: () => { pref.kind = k; save(); render(); } }, t, h("span", { class: "n", text: String(counts[k] || 0) }))));
+    const shown = phones.filter((p) => (pref.kind === "all" || kindOf(p) === pref.kind) &&
+      (!q || p.name.toLowerCase().includes(q) || p.model.toLowerCase().includes(q)));
+    const sort = sorters[pref.sort] || byName;
+    const isOn = (p) => p.state !== "off";
+    const groups = [[secRun, shown.filter(isOn).sort(sort)], [secOff, shown.filter((p) => !isOn(p)).sort(sorters[pref.sort === "kind" ? "kind" : "name"])]];
+    for (const [sec, list] of groups) {
+      sec.hidden = !list.length;
+      sec.querySelector(".count").textContent = String(list.length);
+      const box = sec.lastChild;
+      for (const p of list) {
+        let c = cards.get(p.id);
+        if (!c) { c = make(p); cards.set(p.id, c); }
+        update(c, p);
+        box.append(c.el);  // moves it into order (and across sections when it starts / stops)
       }
     }
-    for (const [id, c] of cards) if (!phones.some((p) => p.id === id)) { c.el.remove(); cards.delete(id); }
+    for (const [id, c] of cards) if (!shown.some((p) => p.id === id)) { c.el.remove(); if (!phones.some((p) => p.id === id)) cards.delete(id); }
+    empty.hidden = shown.length > 0;
+    empty.textContent = !phones.length ? "No devices yet. Make one in the x86Sim launcher or with `x86sim device create`."
+      : "No device matches the search or the device type.";
+  }
+
+  async function tick() {
+    if (!alive) return;
+    try { phones = await api("/api/phones"); } catch (e) { if (e.status === 401) return boot(); return; }
+    if (!alive) return;
+    n++;
+    render();
   }
   async function act(e, id, what) {
     e.target.disabled = true;
@@ -161,6 +240,7 @@ function dashboard() {
     catch (err) { toast(err.message); e.target.disabled = false; }
     tick();
   }
+  setView(pref.view === "list" ? "list" : "grid");
   tick();
   const iv = setInterval(tick, 2000);
   return () => { alive = false; clearInterval(iv); };
@@ -223,7 +303,7 @@ function phoneView(id) {
   }
   function wantWidth() {
     const r = stage.getBoundingClientRect();
-    // the picture's shape as it arrives (a turned phone is wide), else the screen's
+    // the picture's shape as it arrives (a turned device is wide), else the screen's
     const scr = info?.screen || [1206, 2622];
     const aspect = fw && fh ? fw / fh : scr[0] / scr[1];
     const css = Math.min(r.width - 24, (r.height - 24) * aspect) * (window.devicePixelRatio || 1);
@@ -451,7 +531,7 @@ function phoneView(id) {
       buildSide();
     } else if (m.t === "state") {
       lastState = m;
-      if (!m.running) { overlay.hidden = false; overlay.textContent = control ? "The phone is off. Start it from the dashboard." : "The phone is off."; }
+      if (!m.running) { overlay.hidden = false; overlay.textContent = control ? "The device is off. Start it from the dashboard." : "The device is off."; }
       updateSide();
     } else if (m.t === "expired") {
       alive = false;
@@ -494,7 +574,7 @@ function phoneView(id) {
         parts.push(group("Buttons", hold("home", "Home"), hold("lock", "Lock"), hold("volup", "Vol +"), hold("voldown", "Vol −"), hold("siri", "Siri"), hold("action", "Action"),
           btn("Switcher", "App Switcher", () => send({ t: "sys", a: "app_switcher" }))));
         parts.push(group("Device", btn("Rotate ←", "Rotate left", () => send({ t: "rotate", dir: "left" })), btn("Rotate →", "Rotate right", () => send({ t: "rotate", dir: "right" })),
-          btn("Shake", "Device > Shake", () => send({ t: "shake" })), btn("Paste…", "Type text into the phone", openPaste)));
+          btn("Shake", "Device > Shake", () => send({ t: "shake" })), btn("Paste…", "Type text into the device", openPaste)));
         parts.push(group("Keyboard", btn("Software", "I/O > Keyboard > Toggle Software Keyboard (Cmd-K): the on-screen keyboard while a text field is focused", () => send({ t: "sys", a: "soft_keyboard" })),
           btn("Hardware", "I/O > Keyboard > Connect Hardware Keyboard (Shift-Cmd-K): connect / disconnect; disconnected, the software keyboard shows on every focus", () => send({ t: "sys", a: "hw_keyboard" }))));
         if (info.two_screens) {
@@ -502,20 +582,20 @@ function phoneView(id) {
           parts.push(h("div", {}, h("h4", { text: "Fold" }), fold));
         }
       }
-      if (p !== "ios") parts.push(group("Text", btn("Paste…", "Type text into the phone", openPaste)));
+      if (p !== "ios") parts.push(group("Text", btn("Paste…", "Type text into the device", openPaste)));
     }
-    soundBtn = btn("", "The phone's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
-    quickSound = btn("", "The phone's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
+    soundBtn = btn("", "The device's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
+    quickSound = btn("", "The device's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
     const q = [];
     if (control && (p === "ios" || p === "xros")) q.push(hold("home", "Home"));
     if (control && p === "ios") q.push(btn("Switcher", "App Switcher", () => send({ t: "sys", a: "app_switcher" })));
     if (control && p === "tvos") q.push(hold("menu", "Back"), hold("tv", "TV"));
     if (control && p === "watchos") q.push(hold("home", "Crown"), hold("side", "Side"));
-    if (control) q.push(btn("Type…", "Type text into the phone", openPaste));
+    if (control) q.push(btn("Type…", "Type text into the device", openPaste));
     q.push(quickSound);
     quick.replaceChildren(...q);
     const volIn = h("input", { type: "range", min: 0, max: 1, step: 0.05, value: volume, title: "Volume (this browser only)", class: "vol", oninput: (e) => setVolume(Number(e.target.value)) });
-    micBtn = control ? btn("", canMic ? "Your microphone into the phone (asks the browser for it)" : "The microphone needs HTTPS (or localhost) and a browser with AudioWorklet", () => (mic ? micStop() : micStart())) : null;
+    micBtn = control ? btn("", canMic ? "Your microphone into the device (asks the browser for it)" : "The microphone needs HTTPS (or localhost) and a browser with AudioWorklet", () => (mic ? micStop() : micStart())) : null;
     if (micBtn && !canMic) micBtn.disabled = true;
     parts.push(group("Sound", soundBtn, volIn, micBtn));
     updateSound();
@@ -530,9 +610,9 @@ function phoneView(id) {
     const fSel = h("select", { onchange: (e) => { fps = Number(e.target.value); save(); connect(); } }, [15, 30, 60].map((f) => h("option", { value: f, selected: f === fps, text: f + " fps" })));
     parts.push(h("div", {}, h("h4", { text: "Stream" }), h("div", { class: "btns" }, qSel, cSel, fSel), stats));
     if (control) parts.push(h("div", { class: "kbd" }, ...keyHelp(p)));
-    if (control) parts.push(group("Share", btn("Share this phone…", "", () => openShare(id))));
+    if (control) parts.push(group("Share", btn("Share this device…", "", () => openShare(id))));
     if (control && p !== "watchos") parts.push(webPanel());
-    parts.push(h("div", { class: "btns" }, h("a", { class: "btn small", href: "#/", text: "← All phones" })));
+    parts.push(h("div", { class: "btns" }, h("a", { class: "btn small", href: "#/", text: "← All devices" })));
     side.replaceChildren(...parts);
   }
   // Web Inspector: the phone's inspectable pages (Safari, WKWebViews with isInspectable), each with an Inspect link
@@ -557,7 +637,7 @@ function phoneView(id) {
   }
   function keyHelp(p) {
     if (p === "xros") return [h("h4", { text: "Keys" }), ...[["Mouse", "the system pointer: hover, click, drag"], ["Wheel", "scroll where it points"], ["Keys", "the keyboard (click the screen first)"], ["Ctrl+V", "paste"]].map(([a, b]) => h("div", {}, h("b", { text: a }), " " + b))];
-    const l = [["Click / drag", "touch"], ["Alt + drag", "pinch / rotate"], ["Shift + drag", "two-finger pan"], ["Wheel", p === "watchos" ? "Digital Crown" : p === "tvos" ? "swipe the remote" : "scroll"], ["Keys", "the phone's keyboard (click the screen first)"], ["Ctrl+V", "paste"], ["F1 / F2 / F3 / F4", p === "tvos" ? "TV / play / vol" : "home / lock / vol"]];
+    const l = [["Click / drag", "touch"], ["Alt + drag", "pinch / rotate"], ["Shift + drag", "two-finger pan"], ["Wheel", p === "watchos" ? "Digital Crown" : p === "tvos" ? "swipe the remote" : "scroll"], ["Keys", "the device's keyboard (click the screen first)"], ["Ctrl+V", "paste"], ["F1 / F2 / F3 / F4", p === "tvos" ? "TV / play / vol" : "home / lock / vol"]];
     if (p === "tvos") l.splice(0, 3, ["Arrows, Enter, Esc", "remote: move, select, back"], ["Click", "select"]);
     return [h("h4", { text: "Keys" }), ...l.map(([a, b]) => h("div", {}, h("b", { text: a }), " " + b))];
   }
@@ -577,7 +657,7 @@ function phoneView(id) {
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     rec.onstop = () => {
       const blob = new Blob(chunks, { type: type.split(";")[0] });
-      const a = h("a", { href: URL.createObjectURL(blob), download: `${info?.name || "phone"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${type.includes("mp4") ? "mp4" : "webm"}` });
+      const a = h("a", { href: URL.createObjectURL(blob), download: `${info?.name || "device"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${type.includes("mp4") ? "mp4" : "webm"}` });
       document.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
       rec = null;
@@ -828,7 +908,7 @@ async function openShare(phone) {
   const sel = $("#linkPhone");
   try {
     const ps = await api("/api/phones");
-    sel.replaceChildren(h("option", { value: "", text: "Every phone" }), ...ps.map((p) => h("option", { value: p.id, text: p.name, selected: p.id === phone })));
+    sel.replaceChildren(h("option", { value: "", text: "Every device" }), ...ps.map((p) => h("option", { value: p.id, text: p.name, selected: p.id === phone })));
   } catch {}
   $("#linkOut").replaceChildren();
   $("#linkMake").onclick = makeLink;
@@ -881,7 +961,7 @@ async function refreshLinks() {
   try {
     const l = await api("/api/links");
     box.replaceChildren(...(l.length ? l.map((x) => h("div", { class: "tunnel" },
-      h("span", { class: "info", text: `${x.role === "control" ? "drive" : "watch"} · ${x.phone || "every phone"} · until ${x.expires ? new Date(x.expires * 1000).toLocaleString() : "server stop"}` }),
+      h("span", { class: "info", text: `${x.role === "control" ? "drive" : "watch"} · ${x.phone || "every device"} · until ${x.expires ? new Date(x.expires * 1000).toLocaleString() : "server stop"}` }),
       h("button", { type: "button", class: "btn small danger", text: "Revoke", onclick: async () => { await api("/api/links/revoke", { id: x.id }); refreshLinks(); } }))) : ["None"]));
   } catch (e) { box.textContent = e.message; }
 }

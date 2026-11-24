@@ -105,7 +105,7 @@ impl App {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(muted(format!(
-                        "{} · {} of {} free · ~{:.0} MB per phone · room for {} more · KSM {} · clones by {}",
+                        "{} · {} of {} free · ~{:.0} MB per device · room for {} more · KSM {} · clones by {}",
                         if s.model.is_empty() { "no model yet" } else { &s.model },
                         s.free,
                         s.members.len(),
