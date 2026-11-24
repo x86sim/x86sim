@@ -353,7 +353,7 @@ pub fn helper_request(inst: &Instance, req: &Value, timeout: Duration) -> Result
             }
         }
     }
-    bail!("{}: no answer from the phone's helper in {} s (is it running?)", inst.name, timeout.as_secs())
+    bail!("{}: no answer from the device's helper in {} s (is it running?)", inst.name, timeout.as_secs())
 }
 
 fn rand_u64() -> u64 {
@@ -405,7 +405,7 @@ impl Conn {
             bail!("{} is not running", inst.name);
         }
         if !inst.dir.join("LaunchDaemons/com.apple.webinspectord.plist").exists() {
-            bail!("{}: no Web Inspector on this phone (the webinspector feature is off, or the phone was booted before it existed): turn it on and restart the phone", inst.name);
+            bail!("{}: no Web Inspector on this device (the webinspector feature is off, or the device was booted before it existed): turn it on and restart the device", inst.name);
         }
         // an XPC message to its Mach service: launchd_sim starts the job
         let r = helper_request(inst, &json!({"cmd": "xpcping", "service": "com.apple.webinspector"}), Duration::from_secs(20))?;

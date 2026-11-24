@@ -343,7 +343,7 @@ pub fn reflink_supported() -> bool {
 /// (device-repath.py) and identity (mksimdevice.py: UDID, jobs, sim.env), as device-a64.py create does for its base.
 pub fn clone_phone(tpl: &Instance, name: &str) -> Result<PathBuf> {
     let dst = member_dir(name);
-    anyhow::ensure!(!name.is_empty() && !name.contains('/') && !name.contains(".."), "bad phone name {name:?}");
+    anyhow::ensure!(!name.is_empty() && !name.contains('/') && !name.contains(".."), "bad device name {name:?}");
     anyhow::ensure!(!dst.exists(), "{} exists", dst.display());
     let out = Command::new("cp").args(["-a", "--reflink=auto"]).arg(&tpl.dir).arg(&dst).output()?;
     if !out.status.success() {
@@ -391,7 +391,7 @@ pub fn wait_home(id: &str, secs: u64) -> Result<()> {
     let mut mon = instance::Monitor::default();
     loop {
         let insts: Vec<Instance> = instance::list().into_iter().filter(|i| i.id == id).collect();
-        let inst = insts.first().context("phone vanished")?.clone();
+        let inst = insts.first().context("device vanished")?.clone();
         let sts = mon.poll(&insts);
         if let Some(s) = sts.first() {
             if s.phase == instance::Phase::Running && s.home {
@@ -480,7 +480,7 @@ pub fn up(pool: &str, n: usize, o: &UpOpts, log: &mut dyn FnMut(&str)) -> Result
         if st.model.is_empty() {
             st.model = if o.model.is_empty() { "iPhone 17 Pro".into() } else { o.model.clone() };
         } else if !o.model.is_empty() && o.model != st.model {
-            bail!("pool {pool} is of {} phones (down --delete to change the model)", st.model);
+            bail!("pool {pool} is of {} devices (down --delete to change the model)", st.model);
         }
         Ok(st.model.clone())
     })?;
@@ -540,13 +540,13 @@ pub fn up(pool: &str, n: usize, o: &UpOpts, log: &mut dyn FnMut(&str)) -> Result
         let reserve = if o.reserve_mb > 0.0 { o.reserve_mb } else { DEFAULT_RESERVE_MB };
         if avail - cost < reserve && !o.force {
             log(&format!(
-                "stopping at {} of {n} phones: {avail:.0} MB available, one more needs ~{cost:.0} MB and {reserve:.0} MB stay free (--reserve-mb / --force){}",
+                "stopping at {} of {n} devices: {avail:.0} MB available, one more needs ~{cost:.0} MB and {reserve:.0} MB stay free (--reserve-mb / --force){}",
                 up.len(),
-                if ksm().running { "" } else { "; KSM is off: `x86sim pool ksm on` lets phones share identical memory" }
+                if ksm().running { "" } else { "; KSM is off: `x86sim pool ksm on` lets devices share identical memory" }
             ));
             break;
         }
-        log(&format!("booting {pool}-{i} ({avail:.0} MB available, ~{cost:.0} MB per phone)"));
+        log(&format!("booting {pool}-{i} ({avail:.0} MB available, ~{cost:.0} MB per device)"));
         crate::sim::start(&member_dir(&format!("{pool}-{i}")))?;
         wait_home(&id, 900)?;
         log(&format!("{pool}-{i}: at its home screen"));
@@ -636,7 +636,7 @@ pub fn take(pool: &str, o: &TakeOpts) -> Result<Taken> {
         if t0.elapsed().as_secs() >= o.wait_s {
             let s = status(pool)?;
             bail!(
-                "no free phone in pool {pool} ({} members: {} leased, {} resetting, {} not booted){}",
+                "no free device in pool {pool} ({} members: {} leased, {} resetting, {} not booted){}",
                 s.members.len(),
                 s.members.iter().filter(|m| m.state == "leased").count(),
                 s.members.iter().filter(|m| m.state == "resetting").count(),
@@ -649,7 +649,7 @@ pub fn take(pool: &str, o: &TakeOpts) -> Result<Taken> {
 }
 
 fn member_of(st: &State, phone: &str) -> Result<String> {
-    let inst = instance::find(phone).with_context(|| format!("no phone {phone:?}"))?;
+    let inst = instance::find(phone).with_context(|| format!("no device {phone:?}"))?;
     anyhow::ensure!(st.members.contains_key(&inst.id), "{phone} is not in pool {}", st.pool);
     Ok(inst.id)
 }
@@ -689,7 +689,7 @@ pub fn renew(pool: &str, phone: &str, ttl_s: u64) -> Result<u64> {
 /// The reset worker (`x86sim-pool _reset`): runs detached, then the member is free again (reap sees the worker gone)
 pub fn reset_worker(pool: &str, id: &str, mode: &str, apps_at_take: &[String]) -> Result<()> {
     opt_in_ksm();
-    let inst = instance::find(id).context("phone vanished")?;
+    let inst = instance::find(id).context("device vanished")?;
     let say = |s: &str| println!("[{}] {id}: {s}", now());
     match mode {
         "apps" => {

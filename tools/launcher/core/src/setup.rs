@@ -146,7 +146,7 @@ pub fn checks() -> Vec<Check> {
     let (maj, min) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
     let overlay = read("/proc/filesystems").lines().any(|l| l.trim_end().ends_with("overlay")) || Path::new(&format!("/lib/modules/{rel}/kernel/fs/overlayfs")).exists() || Path::new(&format!("/usr/lib/modules/{rel}/kernel/fs/overlayfs")).exists();
     v.push(if !overlay {
-        check("Linux kernel", Level::Fail, format!("{rel}: no overlayfs"), "Darling mounts each phone's system with overlayfs: use a kernel with CONFIG_OVERLAY_FS.")
+        check("Linux kernel", Level::Fail, format!("{rel}: no overlayfs"), "Darling mounts each device's system with overlayfs: use a kernel with CONFIG_OVERLAY_FS.")
     } else if (maj, min) < (5, 15) {
         check("Linux kernel", Level::Warn, rel, "Linux 5.15 or newer recommended (developed on 6.x and 7.x).")
     } else if (maj, min) < (6, 11) {
@@ -159,7 +159,7 @@ pub fn checks() -> Vec<Check> {
     let gb = kb / 1024.0 / 1024.0;
     v.push(match gb {
         g if g >= 15.0 => check("Memory", Level::Ok, format!("{g:.0} GB"), ""),
-        g if g >= 7.5 => check("Memory", Level::Warn, format!("{g:.0} GB"), "A phone uses about 1-3 GB; 16 GB recommended."),
+        g if g >= 7.5 => check("Memory", Level::Warn, format!("{g:.0} GB"), "A device uses about 1-3 GB; 16 GB recommended."),
         g => check("Memory", Level::Fail, format!("{g:.1} GB"), "At least 8 GB needed."),
     });
     // disk: the data dir (runtimes) and the cache (AOT images, prefixes)
@@ -191,7 +191,7 @@ pub fn checks() -> Vec<Check> {
         check("Graphics (Vulkan)", Level::Ok, format!("drivers: {}", icds.join(", ")), "")
     } else {
         let why = if !loader { "no Vulkan loader (libvulkan.so.1)" } else if icds.is_empty() { "no Vulkan driver" } else { "no GPU device node" };
-        check("Graphics (Vulkan)", Level::Warn, why, "Install your GPU's Vulkan driver (NVIDIA's driver, or Mesa RADV / ANV) and vulkan-icd-loader. Without it phones draw in software: slow.")
+        check("Graphics (Vulkan)", Level::Warn, why, "Install your GPU's Vulkan driver (NVIDIA's driver, or Mesa RADV / ANV) and vulkan-icd-loader. Without it devices draw in software: slow.")
     });
     // tools the scripts run
     let mut miss = vec![];
@@ -236,12 +236,12 @@ pub fn checks() -> Vec<Check> {
     // optional memory cap (cli/libexec/limited.sh); without one (no systemd, or a session without a user manager)
     // phones run uncapped
     v.push(if crate::sim::user_systemd() {
-        check("Resource limits", Level::Ok, "systemd user manager: phones get a disk IO cap and low CPU priority", "")
+        check("Resource limits", Level::Ok, "systemd user manager: devices get a disk IO cap and low CPU priority", "")
     } else {
         check(
             "Resource limits",
             Level::Warn,
-            "no systemd user manager: phones run without the disk IO cap, CPU weight or X86SIM_MEM_MAX",
+            "no systemd user manager: devices run without the disk IO cap, CPU weight or X86SIM_MEM_MAX",
             "Optional. A cold boot may make the desktop stutter while it reads the runtime from disk.",
         )
     });
@@ -249,7 +249,7 @@ pub fn checks() -> Vec<Check> {
     let pylib = std::env::var("X86SIM_PYLIB").unwrap_or_default();
     let dns = Command::new("python3").args(["-c", &format!("import sys; sys.path.append({pylib:?}); import dns.resolver")]).stdin(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if !dns {
-        v.push(check("Python dnspython", Level::Warn, "not found", "Install python3-dnspython: phones' network name lookups need it."));
+        v.push(check("Python dnspython", Level::Warn, "not found", "Install python3-dnspython: devices' network name lookups need it."));
     }
     // the privileged step
     v.push(match darling_state() {

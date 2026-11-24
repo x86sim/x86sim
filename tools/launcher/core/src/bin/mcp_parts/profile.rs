@@ -10,13 +10,13 @@ static SESSIONS: Mutex<Option<HashMap<String, (profile::Session, std::path::Path
 
 pub fn tools(phone: &Value) -> Vec<Value> {
     vec![
-        json!({"name": "profile_start", "description": "Start a CPU profile of an app in a running phone (as Instruments' Time Profiler): the translator samples the app's threads while they run (one sample per period_us of CPU time) until profile_stop. Times are those of the translated x86-64 code, so relative costs differ from a device; stacks come from frame pointers.",
+        json!({"name": "profile_start", "description": "Start a CPU profile of an app in a running device (as Instruments' Time Profiler): the translator samples the app's threads while they run (one sample per period_us of CPU time) until profile_stop. Times are those of the translated x86-64 code, so relative costs differ from a device; stacks come from frame pointers.",
             "inputSchema": {"type": "object", "properties": {"phone": phone,
                 "app": {"type": "string", "description": "bundle id of the app, or a pid (x86sim pidof)"},
                 "period_us": {"type": "integer", "description": "CPU time per sample in microseconds (default 1000)"},
                 "max_secs": {"type": "integer", "description": "the sampler stops by itself after this long (default 600)"}},
                 "required": ["app"]}}),
-        json!({"name": "profile_stop", "description": "Stop the phone's CPU profile and answer the summary (top functions by self and total time, per thread; guest code vs native library functions vs the translator) and the path of the profile file (speedscope JSON for https://www.speedscope.app, or gecko for https://profiler.firefox.com, or text).",
+        json!({"name": "profile_stop", "description": "Stop the device's CPU profile and answer the summary (top functions by self and total time, per thread; guest code vs native library functions vs the translator) and the path of the profile file (speedscope JSON for https://www.speedscope.app, or gecko for https://profiler.firefox.com, or text).",
             "inputSchema": {"type": "object", "properties": {"phone": phone,
                 "format": {"type": "string", "enum": ["speedscope", "gecko", "text"], "description": "the file's format (default speedscope)"},
                 "out": {"type": "string", "description": "where to write it (default under $X86SIM_SCRATCH/profiles)"},

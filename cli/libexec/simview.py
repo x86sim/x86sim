@@ -42,7 +42,7 @@ def booted_device():
 
 
 def phone_name():
-    """The phone's name (<device>/name; the device is the one whose data/ holds the input socket)."""
+    """The device's name (<device>/name; the device is the one whose data/ holds the input socket)."""
     for d in (os.path.dirname(os.path.dirname(os.path.abspath(sockpath))), booted_device()):
         try:
             return open(os.path.join(d, "name")).read().strip() or "x86Sim"
@@ -75,7 +75,7 @@ STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(here)), "var/run-a64")
 
 
 def device_ring():
-    """The booted device's frame ring (sim.env SIMFB_RING), else fbring's default: each phone has its own."""
+    """The booted device's frame ring (sim.env SIMFB_RING), else fbring's default: each device has its own."""
     d = booted_device()
     if d and os.environ.get("SIMVIEW_FOLLOW", "1") != "0":
         try:
@@ -189,7 +189,7 @@ def on_activate(app):
     pic.set_can_shrink(True)
     # The screen and, to its right, the launcher's tools (tools/launcher/gui/src/phone.rs screen_toolbar, theme.rs):
     # the same panel, buttons, icons (Phosphor) and colours, the bar 12 px from the screen at its top, the two centred
-    # together on the launcher's page colour. The pair keeps the phone's shape in any window size (a tiling window
+    # together on the launcher's page colour. The pair keeps the device's shape in any window size (a tiling window
     # manager picks it): its aspect is set from the height on every resize. Touches are normalized to the picture.
     css = Gtk.CssProvider()
     rule = """
@@ -452,7 +452,7 @@ def on_activate(app):
         win.set_title("%s — %s" % (phone_name(), why))
 
     def watch():
-        """Once a second: follow the booted phone's ring, and drop the picture when the sim stops or reboots."""
+        """Once a second: follow the booted device's ring, and drop the picture when the sim stops or reboots."""
         p = device_ring()
         if p != ring.path:
             ring.path, ring.mm, ring.ino, state["key"] = p, None, None, None

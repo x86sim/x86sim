@@ -55,7 +55,7 @@ FairPlay-encrypted App Store downloads and binaries without arm64 are refused; `
 x86sim --phone qa snapshot
 ```
 ```
-phone qa · 402x874 pt · front com.apple.Preferences
+device qa · 402x874 pt · front com.apple.Preferences
 app com.apple.Preferences:
 @e17 button "General" id=com.apple.settings.general (201,319)
 @e28 searchfield "Search" (201,822)

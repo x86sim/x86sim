@@ -61,7 +61,7 @@ fn esc(s: &str) -> String {
 /// Serves one of our requests (`wants` said yes); the grant has been checked by the caller
 pub fn handle(_srv: &Arc<Server>, mut s: TcpStream, req: Req, g: Grant) {
     if g.role != Role::Control {
-        return json_resp(&mut s, 403, &json!({"error": "Web Inspector needs a control link (it runs code in the phone's pages)"}));
+        return json_resp(&mut s, 403, &json!({"error": "Web Inspector needs a control link (it runs code in the device's pages)"}));
     }
     let seg: Vec<&str> = req.path.trim_matches('/').split('/').collect();
     let visible = |id: &str| g.phone.as_deref().is_none_or(|p| p == id);
@@ -69,7 +69,7 @@ pub fn handle(_srv: &Arc<Server>, mut s: TcpStream, req: Req, g: Grant) {
     match (req.method.as_str(), seg.as_slice()) {
         ("GET", ["inspector", rest @ ..]) if !rest.is_empty() => serve_ui(&mut s, &rest.join("/"), &req),
         ("GET", ["api", "web", id]) => {
-            let Some(inst) = phone(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = phone(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             let host = req.headers.get("x-forwarded-host").or(req.headers.get("host")).cloned().unwrap_or_default();
             match rwi::targets(&inst, Duration::from_secs(3)) {
                 Ok(apps) => {
@@ -88,7 +88,7 @@ pub fn handle(_srv: &Arc<Server>, mut s: TcpStream, req: Req, g: Grant) {
             }
         }
         ("GET", ["inspect", id]) => {
-            let Some(inst) = phone(id) else { return respond(&mut s, 404, "text/plain", &[], b"no such phone") };
+            let Some(inst) = phone(id) else { return respond(&mut s, 404, "text/plain", &[], b"no such device") };
             let mut extra = vec![("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'".to_string())];
             if let (Some(t), Some(_)) = (req.query.get("t"), g.token.as_ref()) {
                 let secure = req.headers.contains_key("x-forwarded-proto") || req.headers.contains_key("cf-ray") || req.headers.contains_key("tailscale-user-login");
@@ -103,7 +103,7 @@ pub fn handle(_srv: &Arc<Server>, mut s: TcpStream, req: Req, g: Grant) {
             respond(&mut s, 200, "text/html; charset=utf-8", &extra, list_page(&inst, &host).as_bytes())
         }
         ("GET", ["inspect-ws", id, app, page]) => {
-            let Some(inst) = phone(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = phone(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             // from our own origin only (as the viewer's socket): a page elsewhere must not drive the inspector
             let host = req.headers.get("host").cloned().unwrap_or_default();
             if let Some(o) = req.headers.get("origin") {
@@ -311,7 +311,7 @@ pub fn cli(args: &[String]) -> i32 {
         }
     };
     let Some(inst) = inst else {
-        eprintln!("x86sim inspect: which phone? ({})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", "));
+        eprintln!("x86sim inspect: which device? ({})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", "));
         return 2;
     };
     let apps = match rwi::targets(&inst, Duration::from_secs(3)) {

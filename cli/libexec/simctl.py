@@ -478,7 +478,7 @@ def cmd_log(a):
 
 def device_ring():
     """The frame ring of this device (its sim.env SIMFB_RING, a Linux path under /Volumes/SystemRoot). x86Sim: io
-    screenshot / recordVideo read fbring's default (the main phone's ring) whatever device was named, so another phone
+    screenshot / recordVideo read fbring's default (the main device's ring) whatever device was named, so another phone
     was recorded, or nothing ("no frames") when the main phone was off. SIMFB_RING_LINUX still overrides."""
     if os.environ.get("SIMFB_RING_LINUX"):
         return os.environ["SIMFB_RING_LINUX"]

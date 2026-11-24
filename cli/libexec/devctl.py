@@ -44,7 +44,7 @@ def die(msg, code=1):
 
 
 def running(dev=DEV):
-    """The phone's launchd_sim is alive (as the launcher's Monitor finds it)."""
+    """The device's launchd_sim is alive (as the launcher's Monitor finds it)."""
     marker = "/Volumes/SystemRoot%s/data/var/run/launchd_bootstrap.plist" % os.path.realpath(dev)
     marker2 = "/Volumes/SystemRoot%s/data/var/run/launchd_bootstrap.plist" % dev
     for p in os.listdir("/proc"):
@@ -115,9 +115,9 @@ class Lifecycle:
         try:
             fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            die("x86sim %s: the phone is being erased or cloned already" % self.what)
+            die("x86sim %s: the device is being erased or cloned already" % self.what)
         if boot_processes(self.dev):
-            die("x86sim %s: stop the phone first: it is running, starting or stopping (as simctl: Unable to %s in "
+            die("x86sim %s: stop the device first: it is running, starting or stopping (as simctl: Unable to %s in "
                 "current state: Booted)" % (self.what, self.what))
         return self
 
@@ -131,7 +131,7 @@ def helper(cmd, timeout=30, **kw):
 
 
 def edit_plist(name, **kv):
-    """Set keys of a preferences plist in the phone's data (phone off: cfprefsd reads it at the next boot)."""
+    """Set keys of a preferences plist in the device's data (device off: cfprefsd reads it at the next boot)."""
     p = os.path.join(PREFS, name)
     try:
         with open(p, "rb") as f:
@@ -210,7 +210,7 @@ def ui_set_offline(what, value):
 
 
 def platform():
-    """The phone's platform: ios, tvos, watchos or xros (its runtimes/ dir name)."""
+    """The device's platform: ios, tvos, watchos or xros (its runtimes/ dir name)."""
     try:
         p = open(os.path.join(DEV, "runtime")).read().strip().split("-")[0]
     except OSError:
@@ -244,7 +244,7 @@ def ui(a):
         if value:
             ui_set_offline(what, value)
         st = ui_offline_state()
-        st["note"] = "phone off: applies at its next boot"
+        st["note"] = "device off: applies at its next boot"
     if platform() in NO_STYLE:
         st["appearance"] = "unsupported"
     if what and not value:
@@ -271,7 +271,7 @@ def status_bar(a):
         die("x86sim status_bar: Operation not supported (no status bar overrides on %s, as in Apple's simulator)"
             % {"tvos": "tvOS", "watchos": "watchOS"}[platform()], 45)
     if not running():
-        die("x86sim status_bar: the phone is not running (overrides live in the running SpringBoard, as in Apple's simulator)")
+        die("x86sim status_bar: the device is not running (overrides live in the running SpringBoard, as in Apple's simulator)")
     kw = {}
     rest = a[1:]
     while rest:
@@ -316,7 +316,7 @@ def host_set(s):
 
 def need_running(what):
     if not running():
-        die("x86sim %s: the phone is not running" % what)
+        die("x86sim %s: the device is not running" % what)
 
 
 def pbcopy(a):
@@ -343,13 +343,13 @@ def pbpaste(a):
 
 
 def pbsync(a):
-    """Both ways, by polling: the phone's changeCount and the host clipboard's text; the newer change wins."""
+    """Both ways, by polling: the device's changeCount and the host clipboard's text; the newer change wins."""
     need_running("pbsync")
     every = float(a[a.index("--interval") + 1]) if "--interval" in a else 1.0
     r = helper("pasteboard", action="get")
     count, phone = r.get("changeCount"), r.get("string") or ""
     host = host_get()
-    print("x86sim pbsync: syncing the phone's pasteboard with the host clipboard (Ctrl-C to stop)", file=sys.stderr)
+    print("x86sim pbsync: syncing the device's pasteboard with the host clipboard (Ctrl-C to stop)", file=sys.stderr)
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     while True:
         time.sleep(every)
@@ -357,7 +357,7 @@ def pbsync(a):
         if h != host and h != phone:
             r = helper("pasteboard", action="set", string=h)
             count, phone, host = r.get("changeCount"), h, h
-            print("host -> phone: %d chars" % len(h), file=sys.stderr, flush=True)
+            print("host -> device: %d chars" % len(h), file=sys.stderr, flush=True)
             continue
         host = h
         c = helper("pasteboard", action="count").get("changeCount")
@@ -367,7 +367,7 @@ def pbsync(a):
             if isinstance(s, str) and s != host:
                 host_set(s)
                 host = s
-                print("phone -> host: %d chars" % len(s), file=sys.stderr, flush=True)
+                print("device -> host: %d chars" % len(s), file=sys.stderr, flush=True)
             phone = s if isinstance(s, str) else phone
 
 
@@ -386,7 +386,7 @@ def keychain(a):
             else:
                 os.unlink(f)
             n += 1
-        print("x86sim keychain: removed %d keychain files (phone off)" % n, file=sys.stderr)
+        print("x86sim keychain: removed %d keychain files (device off)" % n, file=sys.stderr)
     print("keychain reset")
 
 
@@ -445,9 +445,9 @@ def timezone(a):
             with open(f, "w") as fh:
                 fh.write(z + "\n")
         if running():
-            print("x86sim timezone: applies at the phone's next boot (x86sim restart)", file=sys.stderr)
+            print("x86sim timezone: applies at the device's next boot (x86sim restart)", file=sys.stderr)
     try:
-        print(open(f).read().strip() + " (this phone's)")
+        print(open(f).read().strip() + " (this device's)")
     except OSError:
         print(host_zone() + " (the host's)")
 
@@ -503,15 +503,15 @@ def regenerate(dev):
 
 
 def own_phone(what):
-    """erase / clone act on an arm64 phone's own dir only (var/device-a64*), never on another configured device"""
+    """erase / clone act on an arm64 device's own dir only (var/device-a64*), never on another configured device"""
     if not os.path.basename(DEV).startswith("device-a64") or not os.path.exists(os.path.join(DEV, "runtime")):
-        die("x86sim %s: %s is not an arm64 phone (x86sim device list)" % (what, DEV))
+        die("x86sim %s: %s is not an arm64 device (x86sim device list)" % (what, DEV))
 
 
 def erase(a):
     own_phone("erase")
     if is_default(DEV) and "--force" not in a:
-        die("x86sim erase: this is the main phone (var/device-a64); add --force to erase it anyway")
+        die("x86sim erase: this is the main device (var/device-a64); add --force to erase it anyway")
     with Lifecycle(DEV, "erase"):
         erase_locked()
 
@@ -543,7 +543,7 @@ def clone(a):
     own_phone("clone")
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24].strip("-")
     if not slug:
-        die("x86sim clone: give the new phone a name", 2)
+        die("x86sim clone: give the new device a name", 2)
     with Lifecycle(DEV, "clone"):
         clone_locked(name, slug)
 
@@ -579,7 +579,7 @@ def clone_locked(name, slug):
 # ---- app logs ----
 
 def app_bundle(bid):
-    """(bundle path, executable) of an installed or system app, from the files (the phone may be off)."""
+    """(bundle path, executable) of an installed or system app, from the files (the device may be off)."""
     cands = glob.glob(os.path.join(DATA, "Containers/Bundle/Application/*/*.app"))
     try:
         rt = open(os.path.join(DEV, "runtime")).read().strip()

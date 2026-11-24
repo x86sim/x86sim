@@ -902,7 +902,7 @@ pub fn run(dir: &Path, inst: &Instance, o: &RunOpts, say: &mut dyn FnMut(&str)) 
                 break;
             }
             Err(e) if i < 7 && format!("{e:#}").contains("no answer") => {
-                say("the phone does not answer yet; trying again in 20 s");
+                say("the device does not answer yet; trying again in 20 s");
                 std::thread::sleep(Duration::from_secs(20));
             }
             Err(e) => return Err(e.context("install")),
@@ -1004,11 +1004,11 @@ pub fn passthrough(verb: &str, dir: &Path, args: &[String]) -> Result<Command> {
 pub fn pick_phone(key: Option<&str>) -> Result<Instance> {
     let names = || crate::instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", ");
     if let Some(k) = key.filter(|k| !k.is_empty()) {
-        return crate::instance::find(k).ok_or_else(|| anyhow::anyhow!("no phone {k:?} (phones: {})", names()));
+        return crate::instance::find(k).ok_or_else(|| anyhow::anyhow!("no device {k:?} (devices: {})", names()));
     }
     let running: Vec<_> = crate::instance::summaries(0).into_iter().filter(|s| s.state != "off").collect();
     if running.len() == 1 {
-        return crate::instance::find(&running[0].id).context("phone vanished");
+        return crate::instance::find(&running[0].id).context("device vanished");
     }
     if running.is_empty() {
         let last = load_settings().phone;
@@ -1020,7 +1020,7 @@ pub fn pick_phone(key: Option<&str>) -> Result<Instance> {
             return Ok(all[0].clone());
         }
     }
-    bail!("say which phone (--phone NAME; phones: {})", names())
+    bail!("say which device (--phone NAME; devices: {})", names())
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1028,7 +1028,7 @@ pub fn pick_phone(key: Option<&str>) -> Result<Instance> {
 
 pub fn mcp_tools() -> Vec<serde_json::Value> {
     use serde_json::json;
-    let phone = json!({"type": "string", "description": "the phone: its name, folder (device-a64-qa) or path. Default: the only running phone, else the one the last run used"});
+    let phone = json!({"type": "string", "description": "the device: its name, folder (device-a64-qa) or path. Default: the only running device, else the one the last run used"});
     let project = json!({"type": "string", "description": "the project directory (an xtool project: Package.swift + xtool.yml)"});
     let args = json!({"type": "array", "items": {"type": "string"}});
     vec![
@@ -1040,11 +1040,11 @@ pub fn mcp_tools() -> Vec<serde_json::Value> {
         json!({"name": "dev_new", "description": "Make a new SwiftUI app project (xtool new) in parent (default: ~/x86sim-apps), set up for every simulator platform. Returns its directory.",
                "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "a Swift identifier, e.g. HelloApp"}, "parent": {"type": "string"}}, "required": ["name"]}}),
         json!({"name": "dev_projects", "description": "Recently built app projects: name, kind, bundle id, directory, last build.", "inputSchema": {"type": "object", "properties": {}}}),
-        json!({"name": "dev_build", "description": "Build an xtool project for the simulator (omarchy-apple-dev ship.sh --simulator), for a phone's platform (or platform: ios, tvos, watchos, xros). Returns the .app path and the build log's tail.",
+        json!({"name": "dev_build", "description": "Build an xtool project for the simulator (omarchy-apple-dev ship.sh --simulator), for a device's platform (or platform: ios, tvos, watchos, xros). Returns the .app path and the build log's tail.",
                "inputSchema": {"type": "object", "properties": {"project": project, "phone": phone, "platform": {"type": "string", "enum": ["ios", "tvos", "watchos", "xros"]}, "release": {"type": "boolean"}}, "required": ["project"]}}),
-        json!({"name": "dev_run", "description": "Build an app project for a phone, install it and launch it (the edit-build-run loop). start=true boots the phone first when it is off (minutes). args go to the app. Returns the bundle id, the install / launch answers and the log's tail.",
+        json!({"name": "dev_run", "description": "Build an app project for a device, install it and launch it (the edit-build-run loop). start=true boots the device first when it is off (minutes). args go to the app. Returns the bundle id, the install / launch answers and the log's tail.",
                "inputSchema": {"type": "object", "properties": {"project": project, "phone": phone, "start": {"type": "boolean"}, "release": {"type": "boolean"}, "no_build": {"type": "boolean"}, "args": args}, "required": ["project"]}}),
-        json!({"name": "dev_test", "description": "Smoke-test an app project on a phone: build, install, launch, wait secs (default 10), check it is still running, take a screenshot (PNG path in the answer). passed=false when the app died.",
+        json!({"name": "dev_test", "description": "Smoke-test an app project on a device: build, install, launch, wait secs (default 10), check it is still running, take a screenshot (PNG path in the answer). passed=false when the app died.",
                "inputSchema": {"type": "object", "properties": {"project": project, "phone": phone, "start": {"type": "boolean"}, "secs": {"type": "integer"}, "screenshot": {"type": "string"}}, "required": ["project"]}}),
         json!({"name": "dev_device", "description": "omarchy-apple-dev device-run.sh in the project: build, sign, install and launch on a real iPhone over USB or the tailnet (needs a paired iPhone and xtool auth). args are device-run.sh's (e.g. [\"--console\", \"20\"]); interactive LLDB is not available here. Runs up to 30 minutes; returns the output's tail.",
                "inputSchema": {"type": "object", "properties": {"project": project, "args": args}, "required": ["project"]}}),

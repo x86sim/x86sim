@@ -51,11 +51,11 @@ def udid():
                 return l.split("=", 1)[1].strip()
     except OSError:
         pass
-    die("no phone (%s)" % env)
+    die("no device (%s)" % env)
 
 
 def linux_pid(gpid, u):
-    """The host pid of the phone's process whose Darwin pid is gpid."""
+    """The host pid of the device's process whose Darwin pid is gpid."""
     for d in os.listdir("/proc"):
         if not d.isdigit():
             continue
@@ -77,7 +77,7 @@ def sock_path(u, gpid):
 
 
 def prune(u):
-    """Sockets of this phone's processes that are gone (killed: an exit removes its own)."""
+    """Sockets of this device's processes that are gone (killed: an exit removes its own)."""
     pre = "x86sim-dbg-%s-" % u
     for f in os.listdir(RUN):
         if f.startswith(pre) and f.endswith(".sock") and f[len(pre):-5].isdigit() and linux_pid(int(f[len(pre):-5]), u) is None:
@@ -95,7 +95,7 @@ def ensure_stub(u, gpid, wait=15):
     if hp is None:
         if os.path.exists(p):
             os.unlink(p)   # a dead process's socket
-        die("no process %d in this phone" % gpid)
+        die("no process %d in this device" % gpid)
     # (never probed with connect(): the stub takes every connection as a debugger and stops the process. One debugger
     # at a time: a second waits until the first detaches.)
     if not os.path.exists(p):
@@ -373,7 +373,7 @@ def ask(req, timeout):
     try:
         s.connect(session_sock())
     except OSError:
-        die("no debug session on this phone (x86sim debug --start BUNDLEID)", js=True)
+        die("no debug session on this device (x86sim debug --start BUNDLEID)", js=True)
     s.sendall((json.dumps(req) + "\n").encode())
     print(s.makefile().readline().strip())
 
@@ -427,7 +427,7 @@ def main(a):
     env = swiftlldb.lldb_env(ll["info"])
     if mode == "start":
         if session_alive():
-            die("a debug session is already running on this phone (x86sim debug --stop)", js=True)
+            die("a debug session is already running on this device (x86sim debug --stop)", js=True)
         # the session runs under the Python that lldb's SB API module is built for (the Swift lldb's private one)
         py = ll["python_exe"] or sys.executable
         if ll["python_path"]:

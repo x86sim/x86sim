@@ -8,34 +8,34 @@ use x86sim_core::{aot::repo_root, instance, rtdelete};
 
 pub fn tools(phone: &Value) -> Vec<Value> {
     vec![
-        json!({"name": "runtime_delete", "description": "Delete an installed OS version (see sim_devices runtimes; name it by build, e.g. \"24K150\"). Without confirm=true it only reports what would go: sizes of the version's files (all=false) and of everything (all=true: also its pre-translated code jc-<build>, its files in shared caches, its download log; data other versions use is kept), the phones on it, and what blocks it. A running phone on it blocks the delete unless stop_running=true (it is stopped first). Phones on a deleted version show \"Files missing\" until it is downloaded again. A build deleted earlier with all=false can be named again to remove its leftover pre-translated code.",
+        json!({"name": "runtime_delete", "description": "Delete an installed OS version (see sim_devices runtimes; name it by build, e.g. \"24K150\"). Without confirm=true it only reports what would go: sizes of the version's files (all=false) and of everything (all=true: also its pre-translated code jc-<build>, its files in shared caches, its download log; data other versions use is kept), the devices on it, and what blocks it. A running device on it blocks the delete unless stop_running=true (it is stopped first). Devices on a deleted version show \"Files missing\" until it is downloaded again. A build deleted earlier with all=false can be named again to remove its leftover pre-translated code.",
                "inputSchema": {"type": "object", "properties": {"build": {"type": "string"}, "all": {"type": "boolean"}, "confirm": {"type": "boolean"}, "stop_running": {"type": "boolean"}}, "required": ["build"]}}),
-        json!({"name": "sim_ui", "description": "As simctl ui: appearance (light|dark), content_size (Dynamic Type: extra-small, small, medium, large, extra-large, extra-extra-large, extra-extra-extra-large, accessibility-medium .. accessibility-extra-extra-extra-large, increment, decrement), increase_contrast / reduce_transparency / reduce_motion (enabled|disabled). Without value: reads it; without setting: every setting. A running phone changes at once; one that is off at its next boot.",
+        json!({"name": "sim_ui", "description": "As simctl ui: appearance (light|dark), content_size (Dynamic Type: extra-small, small, medium, large, extra-large, extra-extra-large, extra-extra-extra-large, accessibility-medium .. accessibility-extra-extra-extra-large, increment, decrement), increase_contrast / reduce_transparency / reduce_motion (enabled|disabled). Without value: reads it; without setting: every setting. A running device changes at once; one that is off at its next boot.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "setting": {"type": "string", "enum": ["appearance", "content_size", "increase_contrast", "reduce_transparency", "reduce_motion"]}, "value": {"type": "string"}}}}),
-        json!({"name": "sim_status_bar", "description": "As simctl status_bar (clean screenshots) on a running phone: override (only the fields given change; overrides add up), clear, or list. time is shown as given (\"9:41\") or an ISO 8601 date.",
+        json!({"name": "sim_status_bar", "description": "As simctl status_bar (clean screenshots) on a running device: override (only the fields given change; overrides add up), clear, or list. time is shown as given (\"9:41\") or an ISO 8601 date.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "action": {"type": "string", "enum": ["override", "clear", "list"]},
                    "time": {"type": "string"}, "dataNetwork": {"type": "string", "enum": ["hide", "wifi", "3g", "4g", "lte", "lte-a", "lte+", "5g", "5g+", "5g-uwb", "5g-uc"]},
                    "wifiMode": {"type": "string", "enum": ["searching", "failed", "active"]}, "wifiBars": {"type": "integer", "minimum": 0, "maximum": 3},
                    "cellularMode": {"type": "string", "enum": ["notSupported", "searching", "failed", "active"]}, "cellularBars": {"type": "integer", "minimum": 0, "maximum": 4},
                    "operatorName": {"type": "string"}, "batteryState": {"type": "string", "enum": ["charging", "charged", "discharging"]}, "batteryLevel": {"type": "integer", "minimum": 0, "maximum": 100}}, "required": ["action"]}}),
-        json!({"name": "sim_pasteboard", "description": "The running phone's pasteboard (simctl pbcopy / pbpaste): get, set (text), from_host (the host clipboard onto the phone), to_host (the phone's onto the host clipboard).",
+        json!({"name": "sim_pasteboard", "description": "The running device's pasteboard (simctl pbcopy / pbpaste): get, set (text), from_host (the host clipboard onto the device), to_host (the device's onto the host clipboard).",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "action": {"type": "string", "enum": ["get", "set", "from_host", "to_host"]}, "text": {"type": "string"}}, "required": ["action"]}}),
-        json!({"name": "sim_erase", "description": "Erase a phone that is off back to a new one (simctl erase): apps, data and settings go; model, name, version and features stay. Its next start is a first boot.",
+        json!({"name": "sim_erase", "description": "Erase a device that is off back to a new one (simctl erase): apps, data and settings go; model, name, version and features stay. Its next start is a first boot.",
                "inputSchema": {"type": "object", "properties": {"phone": phone}, "required": ["phone"]}}),
-        json!({"name": "sim_clone", "description": "Copy a phone that is off as a new phone with the given name (simctl clone): same model, version, apps and data (reflinked: no space until it changes).",
+        json!({"name": "sim_clone", "description": "Copy a device that is off as a new device with the given name (simctl clone): same model, version, apps and data (reflinked: no space until it changes).",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "name": {"type": "string"}}, "required": ["phone", "name"]}}),
         json!({"name": "app_logs", "description": "An app's logs in one answer: the crash report of its last run that crashed (the translator's guest backtrace, symbolicated against the dyld cache and the app) and the tail of its os_log file (recorded when it was launched with os_log on: relaunch=true restarts it that way and returns what it logs in the next `secs` seconds).",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "bundle_id": {"type": "string"}, "lines": {"type": "integer"}, "relaunch": {"type": "boolean"}, "secs": {"type": "number"}}, "required": ["bundle_id"]}}),
         json!({"name": "sim_keychain_reset", "description": "Delete every keychain item (simctl keychain reset).", "inputSchema": {"type": "object", "properties": {"phone": phone}}}),
-        json!({"name": "sim_locale", "description": "The phone's language order and region (Settings > Language & Region): languages e.g. [\"fr-CA\", \"en\"], locale e.g. \"fr_CA\". Without either: reads them. Apps take it at their next start.",
+        json!({"name": "sim_locale", "description": "The device's language order and region (Settings > Language & Region): languages e.g. [\"fr-CA\", \"en\"], locale e.g. \"fr_CA\". Without either: reads them. Apps take it at their next start.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "languages": {"type": "array", "items": {"type": "string"}}, "locale": {"type": "string"}}}}),
-        json!({"name": "sim_timezone", "description": "The phone's time zone (an Olson name such as Europe/Paris, or \"host\" for the computer's); applies at its next boot. Without zone: reads it.",
+        json!({"name": "sim_timezone", "description": "The device's time zone (an Olson name such as Europe/Paris, or \"host\" for the computer's); applies at its next boot. Without zone: reads it.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "zone": {"type": "string"}}}}),
-        json!({"name": "sim_fidelity", "description": "Speed vs looks per phone: fast = a 3x iPhone drawn at 2x (same layout, 4/9 of the pixels) plus Reduce Transparency and Reduce Motion; high = native scale and every effect. Effects change at once on a running phone, the scale at its next boot (sim_restart). Without preset: reads it.",
+        json!({"name": "sim_fidelity", "description": "Speed vs looks per device: fast = a 3x iPhone drawn at 2x (same layout, 4/9 of the pixels) plus Reduce Transparency and Reduce Motion; high = native scale and every effect. Effects change at once on a running device, the scale at its next boot (sim_restart). Without preset: reads it.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "preset": {"type": "string", "enum": ["fast", "high"]}}}}),
-        json!({"name": "sim_record_video", "description": "Record the running phone's screen to an MP4 (simctl io recordVideo) for secs seconds (default 5, max 300); returns the file's path and size.",
+        json!({"name": "sim_record_video", "description": "Record the running device's screen to an MP4 (simctl io recordVideo) for secs seconds (default 5, max 300); returns the file's path and size.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "path": {"type": "string"}, "secs": {"type": "number"}, "codec": {"type": "string", "enum": ["h264", "hevc"]}}, "required": ["path"]}}),
-        json!({"name": "sim_screenshot", "description": "The running phone's newest frame as a PNG (simctl io screenshot); returns the path.",
+        json!({"name": "sim_screenshot", "description": "The running device's newest frame as a PNG (simctl io screenshot); returns the path.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "path": {"type": "string"}}, "required": ["path"]}}),
     ]
 }
@@ -135,9 +135,9 @@ pub fn call(name: &str, a: &Value, phone: &dyn Fn() -> anyhow::Result<instance::
             let freed = rtdelete::delete(&plan, all)?;
             Ok(json!({"deleted": plan.dir, "label": plan.label, "all": all, "freed_bytes": freed, "phones_on_it": plan.devices}))
         })(),
-        // destructive: only on a phone the caller named, never the "only running phone" / configured default
+        // destructive: only on a phone the caller named, never the "only running device" / configured default
         "sim_erase" | "sim_clone" | "sim_keychain_reset" if a["phone"].as_str().or(a["device"].as_str()).is_none_or(|s| s.is_empty()) => {
-            Err(anyhow::anyhow!("{name} needs phone: name the phone it acts on (phones_list)"))
+            Err(anyhow::anyhow!("{name} needs phone: name the device it acts on (phones_list)"))
         }
         _ => {
             let inst = match phone() {
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn values_never_become_options() {
         assert!(positional("name", "--host".into()).is_err());
-        assert!(positional("name", "My Phone".into()).is_ok());
+        assert!(positional("name", "My Device".into()).is_ok());
         assert!(valid_bundle_id("com.example.App"));
         assert!(valid_bundle_id("com.apple.mobilesafari"));
         assert!(!valid_bundle_id("--follow"));

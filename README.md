@@ -463,7 +463,7 @@ and SpringBoard (alerts and other system UI on top, the home screen, the status 
 role, label, value, identifier, states, and the point to touch:
 
 ```
-phone ram2 · 402x874 pt · front com.apple.Preferences
+device ram2 · 402x874 pt · front com.apple.Preferences
 app com.apple.Preferences:
 @e17 button "General" id=com.apple.settings.general (201,319)
 @e18 button "Accessibility" id=com.apple.settings.accessibility (201,371)

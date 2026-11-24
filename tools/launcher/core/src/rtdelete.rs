@@ -287,7 +287,7 @@ pub fn stop_devices(p: &Plan, secs: u64) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    bail!("the phones did not stop within {secs} s")
+    bail!("the devices did not stop within {secs} s")
 }
 
 pub fn gb(b: u64) -> String {
@@ -314,7 +314,7 @@ pub fn describe(p: &Plan) -> String {
     }
     if !p.devices.is_empty() {
         s += &format!(
-            "  phones on it: {} (they can't start until it is downloaded again)\n",
+            "  devices on it: {} (they can't start until it is downloaded again)\n",
             p.devices.iter().map(|d| format!("{} [{}]", d.name, d.state)).collect::<Vec<_>>().join(", ")
         );
     }

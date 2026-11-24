@@ -38,7 +38,7 @@ What to run (one of):
                           unit tests hosted in A (default: every bundle in A/PlugIns)
   --test-bundle B.xctest  logic tests (no host app), run by the xctest tool
   --ui-test-runner R.app --app A.app
-                          UI tests: R's PlugIns/*.xctest drive A (needs the phone's xctest feature)
+                          UI tests: R's PlugIns/*.xctest drive A (needs the device's xctest feature)
   --spm DIR               a Swift package: swift build --build-tests for the phone's simulator, then its tests
 Options:
   --only-testing T, --skip-testing T
@@ -731,7 +731,7 @@ class Runner:
                 if kind == "ui":
                     if not os.path.exists(os.path.join(self.dev, "LaunchDaemons", "com.apple.testmanagerd.plist")):
                         raise RuntimeError(
-                            "UI tests need testmanagerd, which this phone was not booted with: turn on its xctest "
+                            "UI tests need testmanagerd, which this device was not booted with: turn on its xctest "
                             "feature (x86sim-aot --device %s features set xctest on, or MCP feature_set id=xctest) and "
                             "restart it" % self.phone)
                     tapp = self.local(t["UITargetAppPath"])
@@ -785,7 +785,7 @@ class Runner:
         except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
             res["error"] = str(e)
         except SystemExit as e:   # simctl's die(): no answer from the phone
-            res["error"] = "the phone did not answer (%s)" % e
+            res["error"] = "the device did not answer (%s)" % e
         res["tests"] = parser.tests
         res["duration"] = round(time.monotonic() - t0, 3)
         failed = any(x["result"] == "failed" for x in parser.tests) or "error" in res

@@ -21,7 +21,7 @@ pub fn handle(req: &Req, inst: &Instance, what: &str, control: bool) -> (u16, Va
         }),
         ("GET", "audit") => {
             if flag("dynamic_type") && !control {
-                return (403, json!({"error": "the Dynamic Type check changes the phone's text size: it needs a control link"}));
+                return (403, json!({"error": "the Dynamic Type check changes the device's text size: it needs a control link"}));
             }
             let o = axaudit::AuditOpts { dynamic_type: flag("dynamic_type"), all: flag("all"), rules: vec![] };
             axaudit::audit(inst, &o).and_then(|r| Ok(serde_json::to_value(r)?))

@@ -417,20 +417,20 @@ pub fn share_urls(st: &State, role: Role, phone: Option<&str>) -> Vec<(String, S
 // ---- MCP (x86sim-mcp): share_* tools, kept here so the server's file only gains a hook ----
 
 pub fn mcp_tools() -> Vec<Value> {
-    let phone = json!({"type": "string", "description": "a phone (name, folder or path): the link opens it directly and, for share_link, is limited to it"});
+    let phone = json!({"type": "string", "description": "a device (name, folder or path): the link opens it directly and, for share_link, is limited to it"});
     vec![
-        json!({"name": "share_start", "description": "Watch and drive phones from a browser: starts x86sim's web server (every phone: a dashboard with live thumbnails, start / stop; a phone: its live screen as H.264 (JPEG where the browser lacks WebCodecs), touches, multi-touch, keyboard, paste, hardware buttons, rotate, shake, screenshot, recording). Listens on loopback unless listen says otherwise; tailscale=true adds HTTPS on the tailnet (tailscale serve), funnel=true makes that public (tailscale funnel), cloudflared=true a public trycloudflare.com quick tunnel. Anything not from this machine needs the token in the URL. Returns the URLs (control: watch and drive; view: watch only). If it runs already, adds the tunnels asked for.",
+        json!({"name": "share_start", "description": "Watch and drive devices from a browser: starts x86sim's web server (every device: a dashboard with live thumbnails, start / stop; a device: its live screen as H.264 (JPEG where the browser lacks WebCodecs), touches, multi-touch, keyboard, paste, hardware buttons, rotate, shake, screenshot, recording). Listens on loopback unless listen says otherwise; tailscale=true adds HTTPS on the tailnet (tailscale serve), funnel=true makes that public (tailscale funnel), cloudflared=true a public trycloudflare.com quick tunnel. Anything not from this machine needs the token in the URL. Returns the URLs (control: watch and drive; view: watch only). If it runs already, adds the tunnels asked for.",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "tailscale": {"type": "boolean"}, "funnel": {"type": "boolean"}, "cloudflared": {"type": "boolean"}, "listen": {"type": "string", "description": "address:port, default 127.0.0.1:7380 (0.0.0.0:7380: the LAN, plain HTTP: browsers then fall back to JPEG)"}, "ttl": {"type": "string", "description": "the tokens expire after this (e.g. 2h, 30m); default when the server stops"}}}}),
         json!({"name": "share_stop", "description": "Stop sharing: the web server, its tunnels and every link.", "inputSchema": {"type": "object", "properties": {"tunnel": {"type": "string", "enum": ["tailscale", "funnel", "cloudflared"], "description": "stop only this tunnel, keep the server"}}}}),
-        json!({"name": "share_status", "description": "Whether phones are shared: server, tunnels with their URLs and state, which tunnels are available here (tailscale logged in, cloudflared installed), open streams and viewers.", "inputSchema": {"type": "object", "properties": {}}}),
-        json!({"name": "share_link", "description": "A new link with its own expiring token: role view (watch only, the default) or control, limited to one phone or not. Returns its URLs (every tunnel that is up, then local).",
+        json!({"name": "share_status", "description": "Whether devices are shared: server, tunnels with their URLs and state, which tunnels are available here (tailscale logged in, cloudflared installed), open streams and viewers.", "inputSchema": {"type": "object", "properties": {}}}),
+        json!({"name": "share_link", "description": "A new link with its own expiring token: role view (watch only, the default) or control, limited to one device or not. Returns its URLs (every tunnel that is up, then local).",
                "inputSchema": {"type": "object", "properties": {"phone": phone, "role": {"type": "string", "enum": ["view", "control"]}, "ttl": {"type": "string", "description": "default 1h, at most 30d"}}}}),
     ]
 }
 
 fn phone_id(a: &Value) -> Result<Option<String>> {
     match a["phone"].as_str().filter(|s| !s.is_empty()) {
-        Some(k) => Ok(Some(crate::instance::find(k).with_context(|| format!("no phone {k:?}"))?.id)),
+        Some(k) => Ok(Some(crate::instance::find(k).with_context(|| format!("no device {k:?}"))?.id)),
         None => Ok(None),
     }
 }
@@ -463,7 +463,7 @@ pub fn mcp_call(name: &str, a: &Value) -> Option<Result<Value>> {
             let failed: Vec<Value> = st.tunnels.iter().filter(|t| t.state == "failed").map(|t| json!({"tunnel": t.kind.name(), "error": t.error})).collect();
             Ok(json!({"running": true, "pid": st.pid, "control": urls_json(&st, Role::Control, phone.as_deref()), "view": urls_json(&st, Role::View, phone.as_deref()),
                       "tunnels": st.tunnels, "failed": failed, "expires": st.expires,
-                      "note": "control URLs let anyone holding them drive the phones: share view URLs (or share_link) with spectators"}))
+                      "note": "control URLs let anyone holding them drive the devices: share view URLs (or share_link) with spectators"}))
         })(),
         "share_stop" => (|| match a["tunnel"].as_str().and_then(Kind::parse) {
             Some(k) => {

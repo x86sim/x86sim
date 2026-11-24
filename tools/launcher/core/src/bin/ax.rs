@@ -41,7 +41,7 @@ The phone: --phone NAME (name, folder or path), else $X86SIM_DEVICE, else the on
 
 fn pick(phone: Option<&str>) -> Result<instance::Instance> {
     if let Some(k) = phone {
-        return instance::find(k).ok_or_else(|| anyhow!("no phone {k:?} (phones: {})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", ")));
+        return instance::find(k).ok_or_else(|| anyhow!("no device {k:?} (devices: {})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", ")));
     }
     if let Ok(d) = std::env::var("X86SIM_DEVICE") {
         if !d.is_empty() && std::path::Path::new(&d).join("sim.env").exists() {
@@ -50,9 +50,9 @@ fn pick(phone: Option<&str>) -> Result<instance::Instance> {
     }
     let running: Vec<_> = instance::summaries(0).into_iter().filter(|s| s.state != "off").collect();
     if running.len() == 1 {
-        return instance::find(&running[0].id).ok_or_else(|| anyhow!("phone vanished"));
+        return instance::find(&running[0].id).ok_or_else(|| anyhow!("device vanished"));
     }
-    bail!("say which phone (--phone NAME)")
+    bail!("say which device (--phone NAME)")
 }
 
 fn main() {

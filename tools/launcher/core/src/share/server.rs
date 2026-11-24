@@ -587,7 +587,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
             json_resp(&mut s, 200, &json!({"server": st, "streams": streams, "available": tunnel::available()}))
         }
         ("GET", ["api", "phones", id, what]) if srv.visible(&g, id) => {
-            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             match *what {
                 "thumb.jpg" => {
                     let w: u32 = req.query.get("w").and_then(|v| v.parse().ok()).unwrap_or(240).clamp(64, 720);
@@ -611,7 +611,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
                         let name = format!("{}-{}.png", inst.name.replace(|c: char| !c.is_ascii_alphanumeric(), "-"), now_s());
                         respond(&mut s, 200, "image/png", &[("Content-Disposition", format!("attachment; filename=\"{name}\""))], &png)
                     }
-                    None => json_resp(&mut s, 409, &json!({"error": "no frame: is the phone running?"})),
+                    None => json_resp(&mut s, 409, &json!({"error": "no frame: is the device running?"})),
                 },
                 // x86sim profile of the front app (or ?app=BUNDLEID) for ?secs (default 5), as a download
                 "profile.json" if control => {
@@ -626,7 +626,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
             }
         }
         ("POST", ["api", "phones", id, act]) if control && srv.visible(&g, id) => {
-            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             let r = match *act {
                 "start" => crate::sim::start(&inst.dir).map(|pid| json!({"starting": true, "pid": pid})),
                 "stop" => {
@@ -657,7 +657,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
             let phone = match g.phone.clone().or_else(|| b["phone"].as_str().filter(|p| !p.is_empty()).map(String::from)) {
                 Some(p) => match instance::find(&p) {
                     Some(i) => Some(i.id),
-                    None => return json_resp(&mut s, 404, &json!({"error": "no such phone"})),
+                    None => return json_resp(&mut s, 404, &json!({"error": "no such device"})),
                 },
                 None => None,
             };
@@ -712,7 +712,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
             }
         }
         ("GET", ["ws", id]) if srv.visible(&g, id) => {
-            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             // the socket must come from this page's own origin (a token in the URL could be replayed by another site's
             // script otherwise, a local browser has no token at all)
             let host = req.headers.get("host").cloned().unwrap_or_default();
@@ -732,7 +732,7 @@ fn handle(srv: &Arc<Server>, mut s: TcpStream, peer: SocketAddr) {
         }
         // the Accessibility Inspector (axapi.rs)
         (_, ["api", "phones", id, "ax", what]) if srv.visible(&g, id) => {
-            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such phone"})) };
+            let Some(inst) = instance::find(id) else { return json_resp(&mut s, 404, &json!({"error": "no such device"})) };
             let (code, v) = super::axapi::handle(&req, &inst, what, control);
             json_resp(&mut s, code, &v)
         }
@@ -1012,7 +1012,7 @@ impl Input {
             "rotate" => self.hid.rotate(v["dir"].as_str() == Some("left")),
             "shake" => self.hid.shake(),
             "hinge" => {
-                self.inst.inner.as_ref().ok_or("this phone has one screen")?;
+                self.inst.inner.as_ref().ok_or("this device has one screen")?;
                 let k = v["pose"].as_str().unwrap_or("");
                 let pose = hid::HINGE_POSES.iter().find(|p| p.key == k).ok_or("unknown pose")?;
                 self.hid.hinge_pose(pose);

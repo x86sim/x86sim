@@ -53,12 +53,12 @@ fn run(a: &mut Vec<String>) -> anyhow::Result<()> {
                 reserve_mb: num(opt(a, "--reserve-mb"), "--reserve-mb")?.unwrap_or(0.0),
                 force: flag(a, "--force"),
             };
-            let n: usize = a.first().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow::anyhow!("up N: how many phones"))?;
+            let n: usize = a.first().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow::anyhow!("up N: how many devices"))?;
             let up = pool::up(&name, n, &o, &mut say)?;
             if json {
                 println!("{}", serde_json::json!({"pool": name, "running": up}));
             } else {
-                println!("{} of {n} phones of pool {name} at their home screen", up.len());
+                println!("{} of {n} devices of pool {name} at their home screen", up.len());
             }
         }
         "take" => {
@@ -108,7 +108,7 @@ fn run(a: &mut Vec<String>) -> anyhow::Result<()> {
                 println!("  {:<14} {:<9} {:<8} {:>6.0} MB{}{}", m.phone, m.state, if m.ready { "home" } else { &m.phase }, m.memory_mb, lease, if m.note.is_empty() { String::new() } else { format!("  [{}]", m.note) });
             }
             println!(
-                "memory: {:.0} MB available, ~{:.0} MB per phone: room for {} more; KSM {}{}; clones: {}",
+                "memory: {:.0} MB available, ~{:.0} MB per device: room for {} more; KSM {}{}; clones: {}",
                 s.mem_available_mb,
                 s.cost_mb,
                 s.room_for,
@@ -129,7 +129,7 @@ fn run(a: &mut Vec<String>) -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&k)?);
                     } else {
                         println!(
-                            "KSM: {}{}; pool phones opt in (PR_SET_MEMORY_MERGE) when they start{}",
+                            "KSM: {}{}; pool devices opt in (PR_SET_MEMORY_MERGE) when they start{}",
                             if !k.available { "not in this kernel" } else if k.running { "on" } else { "off" },
                             if k.running { format!(", {} pages per scan, {:.0} MB shared now", k.pages_to_scan, k.saved_mb) } else { String::new() },
                             if k.available && !k.running { format!("\nturn it on (root):\n  {}", k.enable.join("\n  ")) } else { String::new() }

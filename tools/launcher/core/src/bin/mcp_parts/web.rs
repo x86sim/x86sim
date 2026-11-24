@@ -9,7 +9,7 @@ pub fn tools(phone: &Value) -> Vec<Value> {
     let follow = |what: &str| json!({"type": "number", "description": format!("then keep collecting {what} for this many seconds (default 0, at most 60)")});
     let reload = |what: &str| json!({"type": "boolean", "description": format!("reload the page first and collect {what} from its load (at least 3 s)")});
     vec![
-        json!({"name": "web_targets", "description": "Web content you can inspect on a running phone, per app: Safari's pages (every tab), WKWebViews of apps that set isInspectable = true (as in Apple's simulator), JSContexts. Each page: id (for the other web_* tools), title, URL, kind, app. Starts the phone's webinspectord if needed (the webinspector feature, on by default).",
+        json!({"name": "web_targets", "description": "Web content you can inspect on a running device, per app: Safari's pages (every tab), WKWebViews of apps that set isInspectable = true (as in Apple's simulator), JSContexts. Each page: id (for the other web_* tools), title, URL, kind, app. Starts the device's webinspectord if needed (the webinspector feature, on by default).",
             "inputSchema": {"type": "object", "properties": {"phone": phone}}}),
         json!({"name": "web_eval", "description": "Evaluate JavaScript in a web page (Runtime.evaluate, as in Web Inspector's console: $0, $$() and the other console helpers work; a promise is awaited). Answers the value (JSON) or the exception.",
             "inputSchema": {"type": "object", "properties": {"phone": phone, "target": target, "expression": {"type": "string"}, "timeout_s": {"type": "number", "description": "default 20"}}, "required": ["expression"]}}),

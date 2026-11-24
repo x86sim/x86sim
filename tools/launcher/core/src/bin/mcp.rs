@@ -27,14 +27,14 @@ mod mcp_debug;
 mod mcp_profile;
 
 fn tools() -> Value {
-    let phone = json!({"type": "string", "description": "the phone: its name (as in the hub, e.g. \"QA\"), folder (device-a64-qa) or path. Default: the only running phone, else the configured one"});
+    let phone = json!({"type": "string", "description": "the device: its name (as in the hub, e.g. \"QA\"), folder (device-a64-qa) or path. Default: the only running device, else the configured one"});
     let after = json!({"type": "string", "enum": ["full", "diff", "none"], "description": "what to answer with after the action settled: the whole screen (default), only what changed, or nothing"});
     let mut t = json!([
-        {"name": "phones_list", "description": "Every phone, as the hub shows it: name, model, iOS version and whether it is installed, state (off / starting / running / stopping), home screen reached, memory (MB), CPU %, processes, uptime.",
+        {"name": "phones_list", "description": "Every device, as the hub shows it: name, model, iOS version and whether it is installed, state (off / starting / running / stopping), home screen reached, memory (MB), CPU %, processes, uptime.",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "sim_status", "description": "Same as phones_list (kept for older clients).",
          "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "features_list", "description": "List a phone's optional features: id, title, on/off, default, measured memory cost (MB) and whether it is paid every boot or only when used. Changes apply at the next boot.",
+        {"name": "features_list", "description": "List a device's optional features: id, title, on/off, default, measured memory cost (MB) and whether it is paid every boot or only when used. Changes apply at the next boot.",
          "inputSchema": {"type": "object", "properties": {"phone": phone}}},
         {"name": "feature_get", "description": "Whether one feature is on.",
          "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "phone": phone}, "required": ["id"]}},
@@ -42,12 +42,12 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "enabled": {"type": "boolean"}, "phone": phone}, "required": ["id", "enabled"]}},
         {"name": "features_preset", "description": "Apply a preset: full (the default set), lean, minimal. Applies at the next boot.",
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "enum": ["full", "lean", "minimal"]}, "phone": phone}, "required": ["name"]}},
-        {"name": "sim_devices", "description": "Phones (folder, label with phone model, iOS), the phone models a new phone can be and the installed iOS versions.",
+        {"name": "sim_devices", "description": "Devices (folder, label with device model, iOS), the device models a new device can be and the installed iOS versions.",
          "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "sim_add_device", "description": "Make a new phone of a model (see sim_devices models), optional name and version (ios, e.g. \"27.2\": iOS for an iPhone or iPad, tvOS for an Apple TV, watchOS for an Apple Watch, or a build such as \"24B91016s\"; see sim_devices runtimes; a model with a runtime of its own, the iPhone Duo's 24B91016s, gets that one). Start it with sim_start phone=<name>. Its first start can take a few minutes.",
+        {"name": "sim_add_device", "description": "Make a new device of a model (see sim_devices models), optional name and version (ios, e.g. \"27.2\": iOS for an iPhone or iPad, tvOS for an Apple TV, watchOS for an Apple Watch, or a build such as \"24B91016s\"; see sim_devices runtimes; a model with a runtime of its own, the iPhone Duo's 24B91016s, gets that one). Start it with sim_start phone=<name>. Its first start can take a few minutes.",
          "inputSchema": {"type": "object", "properties": {"model": {"type": "string"}, "name": {"type": "string"}, "ios": {"type": "string"}}, "required": ["model"]}},
-        {"name": "sim_start", "description": "Start a phone (its own container, so other phones keep running). Returns at once; poll phones_list for state running.", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
-        {"name": "sim_fold", "description": "Fold or unfold a two-screen phone (iPhone Duo): open=true opens it flat (the large inner screen takes over), open=false closes it (the outer screen); or angle in degrees (0 closed .. 180 flat; SpringBoard swaps screens at 85); or pose, a preset as in Xcode's DeviceHub: closed, half-portrait (90 degrees, portrait), half-landscape (90 degrees, landscape), open. The hinge moves over ms (default 600) as a hand would.",
+        {"name": "sim_start", "description": "Start a device (its own container, so other devices keep running). Returns at once; poll phones_list for state running.", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
+        {"name": "sim_fold", "description": "Fold or unfold a two-screen device (iPhone Duo): open=true opens it flat (the large inner screen takes over), open=false closes it (the outer screen); or angle in degrees (0 closed .. 180 flat; SpringBoard swaps screens at 85); or pose, a preset as in Xcode's DeviceHub: closed, half-portrait (90 degrees, portrait), half-landscape (90 degrees, landscape), open. The hinge moves over ms (default 600) as a hand would.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "open": {"type": "boolean"}, "angle": {"type": "number"}, "pose": {"type": "string", "enum": ["closed", "half-portrait", "half-landscape", "open"]}, "ms": {"type": "integer"}}}},
         {"name": "sim_button", "description": "Press a hardware button as Apple's simulator does (DeviceHub's Home, Lock, Side Button, Volume, Siri, Action Button, Apple Pay; an Apple TV's Siri Remote: select, menu (back), tv, playpause, siri). Per platform: on a watch home is the Digital Crown's press and side its side button. ms: how long it is held (default 100; e.g. 2500 on lock = Siri on an iPhone).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "name": {"type": "string", "enum": ["home", "lock", "side", "volup", "voldown", "siri", "action", "wallet", "playpause", "tv", "select", "menu", "back", "mute"]}, "ms": {"type": "integer"}}, "required": ["name"]}},
@@ -62,21 +62,21 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"phone": phone, "button": {"type": "string", "enum": ["up", "down", "left", "right", "a", "b", "x", "y", "l1", "r1", "l2", "r2"]}, "action": {"type": "string", "enum": ["press", "down", "up"]}, "stick": {"type": "string", "enum": ["left", "right"]}, "x": {"type": "number"}, "y": {"type": "number"}}}},
         {"name": "sim_pointer", "description": "An iPad's mouse, as Apple's simulator's pointer capture (the iPad gets a mouse at the first call and draws its pointer; remove takes it away), or a Vision Pro's pointer: move by dx, dy points (the iPad speeds large moves up), at: put it at x, y (0..1 of the screen as shown, exact), click, button down / up, scroll by dx, dy (positive dy: down the page).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "action": {"type": "string", "enum": ["move", "at", "click", "down", "up", "scroll", "remove"]}, "dx": {"type": "number"}, "dy": {"type": "number"}, "x": {"type": "number"}, "y": {"type": "number"}}, "required": ["action"]}},
-        {"name": "sim_system", "description": "Apple simulator controls without a button of their own: app_switcher (iPhone / iPad: the home button pressed twice), standby_show / standby_hide (iPhone StandBy; SpringBoard shows it when the phone is locked and in landscape: sim_orientation, sim_button lock then home), double_tap / wrist_flick (Apple Watch hand gestures: the Smart Stack opens / closes on the watch face), trackpad_on / trackpad_off (an iPad's trackpad device, as Apple's Simulate Trackpad; its gestures are not simulated).",
+        {"name": "sim_system", "description": "Apple simulator controls without a button of their own: app_switcher (iPhone / iPad: the home button pressed twice), standby_show / standby_hide (iPhone StandBy; SpringBoard shows it when the device is locked and in landscape: sim_orientation, sim_button lock then home), double_tap / wrist_flick (Apple Watch hand gestures: the Smart Stack opens / closes on the watch face), trackpad_on / trackpad_off (an iPad's trackpad device, as Apple's Simulate Trackpad; its gestures are not simulated).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "action": {"type": "string", "enum": ["app_switcher", "standby_show", "standby_hide", "double_tap", "wrist_flick", "trackpad_on", "trackpad_off"]}}, "required": ["action"]}},
         {"name": "sim_memory_warning", "description": "Simulate Memory Warning: every process gets the memory-pressure event (apps: didReceiveMemoryWarning).", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
-        {"name": "sim_stop", "description": "Stop a phone (only that phone).", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
-        {"name": "sim_restart", "description": "Restart a phone (stop, then start with its current features and the pre-translated code). Returns at once; poll phones_list.",
+        {"name": "sim_stop", "description": "Stop a device (only that device).", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
+        {"name": "sim_restart", "description": "Restart a device (stop, then start with its current features and the pre-translated code). Returns at once; poll phones_list.",
          "inputSchema": {"type": "object", "properties": {"phone": phone}}},
-        {"name": "app_install", "description": "Install an iOS Simulator app (.app bundle built for arm64 iphonesimulator) on a running phone, as simctl install: installd installs it and the home screen shows its icon. Returns the bundle id.",
+        {"name": "app_install", "description": "Install an iOS Simulator app (.app bundle built for arm64 iphonesimulator) on a running device, as simctl install: installd installs it and the home screen shows its icon. Returns the bundle id.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "path": {"type": "string", "description": "the .app directory on this machine"}}, "required": ["path"]}},
-        {"name": "app_uninstall", "description": "Uninstall an app from a running phone (simctl uninstall).",
+        {"name": "app_uninstall", "description": "Uninstall an app from a running device (simctl uninstall).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "bundle_id": {"type": "string"}}, "required": ["bundle_id"]}},
-        {"name": "app_launch", "description": "Open an app on a running phone by bundle id (simctl launch); args are passed to the app. Returns the pid.",
+        {"name": "app_launch", "description": "Open an app on a running device by bundle id (simctl launch); args are passed to the app. Returns the pid.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "bundle_id": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}, "required": ["bundle_id"]}},
-        {"name": "app_list", "description": "Installed apps on a running phone (simctl listapps).", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
+        {"name": "app_list", "description": "Installed apps on a running device (simctl listapps).", "inputSchema": {"type": "object", "properties": {"phone": phone}}},
         // agents: the screen as text and actions on its elements (x86sim_core::ax, host/simax)
-        {"name": "snapshot", "description": "The phone's screen as text: the accessibility elements of the app(s) in front, SpringBoard (alerts, home screen icons, status bar, Control Center) and web pages (DOM: links, buttons, fields, headings, text). One line per element: @ref role \"label\" value= id= [states] (center x,y in points). Refs stay the same for the same element across snapshots, so act on them (tap ref=@e3). diff=true: only what changed since the last snapshot. all=true: also elements scrolled out of view. json=true: full records (frames, app, layer, window).",
+        {"name": "snapshot", "description": "The device's screen as text: the accessibility elements of the app(s) in front, SpringBoard (alerts, home screen icons, status bar, Control Center) and web pages (DOM: links, buttons, fields, headings, text). One line per element: @ref role \"label\" value= id= [states] (center x,y in points). Refs stay the same for the same element across snapshots, so act on them (tap ref=@e3). diff=true: only what changed since the last snapshot. all=true: also elements scrolled out of view. json=true: full records (frames, app, layer, window).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "diff": {"type": "boolean"}, "all": {"type": "boolean"}, "json": {"type": "boolean"}}}},
         {"name": "tap", "description": "Tap an element and answer with the screen after it settled. target: a ref from the snapshot (@e3), id:<accessibility identifier>, or label text (exact, then prefix, then substring; alerts over the app win); or x and y in points. An element scrolled out of view is scrolled in first. hold_ms >= 500 is a long press.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "target": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "hold_ms": {"type": "integer"}, "after": after}}},
@@ -96,7 +96,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"phone": phone, "target": {"type": "string"}, "gone": {"type": "boolean"}, "timeout": {"type": "number"}}, "required": ["target"]}},
         {"name": "press", "description": "Press a hardware button (home, lock, side, volup, voldown, siri, action, ...; as sim_button) and answer with the screen after it.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "button": {"type": "string"}, "ms": {"type": "integer"}, "after": after}, "required": ["button"]}},
-        {"name": "sim_keyboard", "description": "Apple Simulator's I/O > Keyboard. software: on / off / toggle the on-screen keyboard while a hardware keyboard is connected (Toggle Software Keyboard, Cmd-K; it shows while a text field is focused). hardware: connect / disconnect / toggle the simulated hardware keyboard (Connect Hardware Keyboard, Shift-Cmd-K; disconnected, the software keyboard shows on every focus as on a device; kept across boots, also for a phone that is off). status: both states. Typing (type, key) works either way; snapshot lists the keyboard's keys (role key) while it is up. Answers with the screen.",
+        {"name": "sim_keyboard", "description": "Apple Simulator's I/O > Keyboard. software: on / off / toggle the on-screen keyboard while a hardware keyboard is connected (Toggle Software Keyboard, Cmd-K; it shows while a text field is focused). hardware: connect / disconnect / toggle the simulated hardware keyboard (Connect Hardware Keyboard, Shift-Cmd-K; disconnected, the software keyboard shows on every focus as on a device; kept across boots, also for a device that is off). status: both states. Typing (type, key) works either way; snapshot lists the keyboard's keys (role key) while it is up. Answers with the screen.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "keyboard": {"type": "string", "enum": ["software", "hardware", "status"]}, "action": {"type": "string", "enum": ["on", "off", "toggle", "connect", "disconnect"]}, "after": after}, "required": ["keyboard"]}},
         {"name": "screenshot", "description": "The screen as an image (PNG), upright. Default scale: one pixel per point, so positions match the snapshot's coordinates; scale=1 for full device pixels, 2 for half, etc. (a divisor).",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "scale": {"type": "integer"}}}},
@@ -104,7 +104,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"phone": phone, "url": {"type": "string"}, "after": after}, "required": ["url"]}},
         {"name": "app_terminate", "description": "Stop a running app by bundle id (simctl terminate) and answer with the screen.",
          "inputSchema": {"type": "object", "properties": {"phone": phone, "bundle_id": {"type": "string"}, "after": after}, "required": ["bundle_id"]}},
-        {"name": "aot_status", "description": "Pre-translated code of a phone's iOS version: parts up to date / stale (with reasons) / missing, and the translator's codegen version.",
+        {"name": "aot_status", "description": "Pre-translated code of a device's iOS version: parts up to date / stale (with reasons) / missing, and the translator's codegen version.",
          "inputSchema": {"type": "object", "properties": {"phone": phone}}}
     ]);
     // ---- Share (browser streaming): share_start / share_stop / share_status / share_link, x86sim_core::share ----
@@ -144,14 +144,14 @@ fn phone_of(a: &Value, cfg: &aot::Config) -> anyhow::Result<instance::Instance> 
     let key = a["phone"].as_str().or(a["device"].as_str());
     if let Some(k) = key {
         return instance::find(k).ok_or_else(|| {
-            anyhow::anyhow!("no phone {k:?} (phones: {})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", "))
+            anyhow::anyhow!("no device {k:?} (devices: {})", instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", "))
         });
     }
     let running: Vec<_> = instance::summaries(0).into_iter().filter(|s| s.state != "off").collect();
     if running.len() == 1 {
-        return instance::find(&running[0].id).ok_or_else(|| anyhow::anyhow!("phone vanished"));
+        return instance::find(&running[0].id).ok_or_else(|| anyhow::anyhow!("device vanished"));
     }
-    let d = cfg.device.clone().ok_or_else(|| anyhow::anyhow!("say which phone (phone: name)"))?;
+    let d = cfg.device.clone().ok_or_else(|| anyhow::anyhow!("say which device (phone: name)"))?;
     Ok(instance::load(&d))
 }
 
@@ -523,17 +523,17 @@ mod pool_mcp {
         if let Some(arr) = tools.as_array_mut() {
             for t in arr.iter_mut() {
                 if t["name"] == "app_install" {
-                    t["description"] = json!("Install an app on a running phone, as simctl install: installd installs it and the home screen shows its icon. Takes a simulator .app, or a device build: an .ipa, an .xcarchive or a device .app (converted for the simulator first: every Mach-O retagged to the simulator platform, Info.plist platform keys, ad-hoc re-signed keeping entitlements; arm64 only; FairPlay-encrypted App Store downloads are refused). Returns the bundle id and, for a device build, what was converted.");
+                    t["description"] = json!("Install an app on a running device, as simctl install: installd installs it and the home screen shows its icon. Takes a simulator .app, or a device build: an .ipa, an .xcarchive or a device .app (converted for the simulator first: every Mach-O retagged to the simulator platform, Info.plist platform keys, ad-hoc re-signed keeping entitlements; arm64 only; FairPlay-encrypted App Store downloads are refused). Returns the bundle id and, for a device build, what was converted.");
                     t["inputSchema"]["properties"]["path"]["description"] = json!("the .app directory, .ipa file or .xcarchive on this machine");
                 }
             }
             let pool = json!({"type": "string", "description": "the pool (default \"pool\"; x86sim pool up N --pool NAME makes one)"});
             let reset = json!({"type": "string", "enum": pool::RESETS, "description": "what happens when it is given back: none, apps (default: uninstall the apps installed during the lease, with their data, then Home), restart (fresh boot), erase (re-cloned from the pool's template, then booted)"});
-            arr.push(json!({"name": "pool_status", "description": "The phone pool (phones kept booted for agents; made with `x86sim pool up N`): each phone's state (free / leased / resetting), whether it is at its home screen, who holds it and for how long, memory per phone, how many more fit in memory, KSM sharing and reflink cloning.",
+            arr.push(json!({"name": "pool_status", "description": "The device pool (devices kept booted for agents; made with `x86sim pool up N`): each device's state (free / leased / resetting), whether it is at its home screen, who holds it and for how long, memory per device, how many more fit in memory, KSM sharing and reflink cloning.",
                 "inputSchema": {"type": "object", "properties": {"pool": pool}}}));
-            arr.push(json!({"name": "phone_take", "description": "Take a booted phone from the pool (atomic: no other caller gets it). Returns its name: pass it as `phone` to the other tools. The lease ends when this MCP session ends (the server's process is the holder) or after ttl_s (default 1800; renew by taking again is not needed: call phone_take with renew=<phone>); then the phone is reset and free again. Give it back with phone_release.",
-                "inputSchema": {"type": "object", "properties": {"pool": pool, "ttl_s": {"type": "integer"}, "reset": reset, "wait_s": {"type": "integer", "description": "wait up to this long for a phone to be free (default 0)"}, "renew": {"type": "string", "description": "extend the lease of this phone you hold instead of taking another"}}}}));
-            arr.push(json!({"name": "phone_release", "description": "Give a pool phone back. It is reset in the background (reset, default: the mode given at phone_take) and free again when done.",
+            arr.push(json!({"name": "phone_take", "description": "Take a booted device from the pool (atomic: no other caller gets it). Returns its name: pass it as `device` to the other tools. The lease ends when this MCP session ends (the server's process is the holder) or after ttl_s (default 1800; renew by taking again is not needed: call phone_take with renew=<device>); then the device is reset and free again. Give it back with phone_release.",
+                "inputSchema": {"type": "object", "properties": {"pool": pool, "ttl_s": {"type": "integer"}, "reset": reset, "wait_s": {"type": "integer", "description": "wait up to this long for a device to be free (default 0)"}, "renew": {"type": "string", "description": "extend the lease of this device you hold instead of taking another"}}}}));
+            arr.push(json!({"name": "phone_release", "description": "Give a pool device back. It is reset in the background (reset, default: the mode given at phone_take) and free again when done.",
                 "inputSchema": {"type": "object", "properties": {"pool": pool, "phone": {"type": "string"}, "reset": reset}, "required": ["phone"]}}));
         }
         tools
@@ -558,7 +558,7 @@ mod pool_mcp {
             }
             "phone_release" => match a["phone"].as_str() {
                 Some(ph) => pool::release(&p, ph, a["reset"].as_str()).map(|m| json!({"phone": ph, "released": true, "reset": m})),
-                None => Err(anyhow::anyhow!("phone required")),
+                None => Err(anyhow::anyhow!("device required")),
             },
             _ => return None,
         })

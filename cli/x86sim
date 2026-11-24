@@ -21,7 +21,7 @@ usage() {
 	cat <<'U'
 usage: x86sim <command> [args]
 
-Phones
+Devices
   wait [home|app] [s]  wait for the home screen (or an app page) on the framebuffer
   device models|list   arm64 device models (iPhone, iPad, Apple TV, Apple Watch) / devices (var/device-a64*)
   device create --model "iPhone 17 Pro" [name]
@@ -31,31 +31,31 @@ Phones
                        27.x simulator runtimes from Apple (no Mac / Apple ID): fetch downloads build B into runtimes/
   runtime delete B [--all] [--stop] [--yes] [--dry-run] [--json]
                        delete an installed version: its runtime files only, or --all also its pre-translated code
-                       (jc-<build>, its files in shared caches, download log; shared data stays). Sizes and the phones
-                       on it are shown first; a running phone blocks it (--stop stops those phones first)
+                       (jc-<build>, its files in shared caches, download log; shared data stays). Sizes and the devices
+                       on it are shown first; a running device blocks it (--stop stops those devices first)
   logs [label]         list the device's job logs, or tail one (<device>/data/var/log/<label>.log)
   logs BUNDLEID [--follow] [--relaunch] [--lines N]
                        an app's os_log and the crash report of its last run, symbolicated (devctl.py applog);
                        --relaunch restarts it with its os_log recorded and follows it
   erase | clone NEWNAME
-                       the phone back to new (simctl erase) / a copy as a new phone (simctl clone); the phone must be off
+                       the device back to new (simctl erase) / a copy as a new device (simctl clone); the device must be off
   ui [appearance|content_size|increase_contrast|reduce_transparency|reduce_motion] [VALUE]
                        as simctl ui: light|dark, a Dynamic Type size (large, extra-large, accessibility-medium, ...,
-                       increment, decrement), enabled|disabled; no VALUE prints the setting. Off phones: at next boot
+                       increment, decrement), enabled|disabled; no VALUE prints the setting. Off devices: at next boot
   status_bar override [--time T] [--dataNetwork wifi|5g|lte|...] [--wifiBars N] [--cellularBars N]
                       [--operatorName S] [--batteryState charging|charged|discharging] [--batteryLevel N] ... | clear | list
                        as simctl status_bar (clean screenshots): overrides add up until clear
   pbcopy [--host] [TEXT] | pbpaste [--host] | pbsync
-                       the phone's pasteboard (simctl pbcopy / pbpaste: TEXT or stdin); --host takes / puts the host
+                       the device's pasteboard (simctl pbcopy / pbpaste: TEXT or stdin); --host takes / puts the host
                        clipboard (wl-clipboard, xclip or xsel); pbsync keeps both the same until Ctrl-C
   keychain reset | locale [--language fr-CA,en] [--locale fr_CA] | timezone [ZONE|host]
                        delete every keychain item; the language / region (apps pick it up at their next start); the
-                       phone's time zone (next boot)
+                       device's time zone (next boot)
   fidelity [fast|high] fast: a 3x iPhone drawn at 2x (fewer pixels) + Reduce Transparency and Reduce Motion; high:
                        native scale, every effect (the scale applies at the next boot)
 
 Agents (read the screen as text, act on elements; same core as the MCP server's snapshot / tap / ... tools)
-  [--phone NAME] <command>   any command on a phone by name / folder / path (default: x86sim.env's X86SIM_DEVICE)
+  [--phone NAME] <command>   any command on a device by name / folder / path (default: x86sim.env's X86SIM_DEVICE)
   snapshot [--diff] [--all] [--json]
                        the screen as text: the front app's accessibility elements, SpringBoard's (alerts, home screen,
                        status bar) and web content, one per line: @e3 role "label" value= id= [states] (x,y points).
@@ -112,7 +112,7 @@ Display and input
                        return (select) and escape (back) are the remote
   fps [secs]           delivered frames per second (fpsmeter.py)
   serve [--bg] [--listen ADDR] [--tailscale|--funnel] [--cloudflared] [--ttl 2h] [--open]
-                       every phone in a browser: dashboard, live screen (H.264 / JPEG), touch, keys, paste, buttons;
+                       every device in a browser: dashboard, live screen (H.264 / JPEG), touch, keys, paste, buttons;
                        --tailscale: HTTPS on your tailnet, --funnel / --cloudflared: a public HTTPS URL (token links)
   serve status | stop [TUNNEL] | link [--phone NAME] [--control] [--ttl 1h]
                        the running server's URLs (and a QR code), stop it or one tunnel, a new expiring link
@@ -163,7 +163,7 @@ Tests (as xcodebuild test-without-building; cli/libexec/xctest.py, `x86sim test 
   test [PHONE] --xctestrun FILE.xctestrun [--only-testing T] [--skip-testing T] [--json F] [--junit F]
   test [PHONE] --app A.app [--test-bundle B.xctest] | --test-bundle B.xctest | --ui-test-runner R.app --app A.app
   test [PHONE] --spm DIR
-                       run XCTest unit / logic tests and XCUITest UI tests (UI tests: the phone's xctest feature):
+                       run XCTest unit / logic tests and XCUITest UI tests (UI tests: the device's xctest feature):
                        per-test results, failures with file:line, junit.xml + results.json; exit 0 passed, 1 failed.
                        XCTest's frameworks come from Xcode (sdks/<Platform>.platform or the x86sim dev SDK)
   test fetch-platform [ios|tvos|watchos|xros]
@@ -173,15 +173,15 @@ Develop apps (omarchy-apple-dev, external/omarchy-apple-dev; `x86sim dev help` f
   dev status | setup [all|swift|toolchain|sdk --xip X|repair|verify] [--bg] | job [--follow]
                        the app toolchain (Swift, xtool, the iOS SDK from Xcode.xip): state, install (no root)
   dev new NAME | build [DIR] | run [DIR] [--phone P] [--start] | test [DIR] [--phone P]
-                       a new SwiftUI app; build it for the simulator; build + install + launch on a phone in one step
+                       a new SwiftUI app; build it for the simulator; build + install + launch on a device in one step
   dev test --xctest [DIR] [--phone P]
-                       the package's XCTest / Swift Testing tests, built here and run on the phone (x86sim test --spm)
+                       the package's XCTest / Swift Testing tests, built here and run on the device (x86sim test --spm)
   dev device | ship | ship-mac | convert | auth
                        real iPhones (device-run.sh), App Store / TestFlight (ship.sh), Xcode project conversion
-Pool (phones kept booted for agents / CI; x86sim-pool, see `x86sim pool help`)
-  pool up N [--model M] [--preset lean]   clone and boot N phones (memory permitting)
+Pool (devices kept booted for agents / CI; x86sim-pool, see `x86sim pool help`)
+  pool up N [--model M] [--preset lean]   clone and boot N devices (memory permitting)
   pool take [--ttl S] [--reset none|apps|restart|erase] [--pid PID|--hold-parent] [--wait S]
-                       a booted free phone's name; the lease ends at the TTL or when the holder process exits
+                       a booted free device's name; the lease ends at the TTL or when the holder process exits
   pool release PHONE [--reset MODE] | renew PHONE | status | down [--delete] | ksm [on|off]
                        (--pool NAME for another pool; default "pool")
 
@@ -234,7 +234,7 @@ cmd_logs() {
 # screenshots and the agent commands alike
 while [ $# -ge 2 ] && { [ "$1" = --phone ] || [ "$1" = -p ]; }; do
 	. "$X/cli/lib/pickdevice.sh"
-	pick_device "$2" || { echo "x86sim: no phone $2" >&2; exit 2; }
+	pick_device "$2" || { echo "x86sim: no device $2" >&2; exit 2; }
 	export X86SIM_DEVICE
 	export SIMHID_SOCKET=$X86SIM_DEVICE/data/simhid.sock
 	_v=$(basename "$X86SIM_DEVICE"); export SIMFB_RING_LINUX=/dev/shm/x86sim-${_v#device-}-simfb.ring
@@ -332,8 +332,8 @@ case $c in
 		# erase / clone destroy or copy a whole phone: only one named here, never the configured default (a name that
 		# matched no phone fell back to X86SIM_DEVICE and erased it)
 		case $c in erase|clone)
-			case "$X86SIM_DEVICE" in */var/device-a64*) ;; *) echo "x86sim $c: name the phone (x86sim $c NAME); ${1:-none given} is no phone" >&2; exit 2 ;; esac
-			[ "${_picked:-}" = 1 ] || { echo "x86sim $c: no phone ${1:-} (x86sim device list)" >&2; exit 2; } ;;
+			case "$X86SIM_DEVICE" in */var/device-a64*) ;; *) echo "x86sim $c: name the device (x86sim $c NAME); ${1:-none given} is no device" >&2; exit 2 ;; esac
+			[ "${_picked:-}" = 1 ] || { echo "x86sim $c: no device ${1:-} (x86sim device list)" >&2; exit 2; } ;;
 		esac
 		exec python3 "$L/devctl.py" "$c" "$@" ;;
 	build) exec make -C "$X" "$@" ;;

@@ -226,7 +226,7 @@ impl Snapshot {
     /// The compact text form an agent reads.
     pub fn text(&self) -> String {
         let mut out = format!(
-            "phone {} · {}{}{} · front {}{}\n",
+            "device {} · {}{}{} · front {}{}\n",
             self.phone,
             if self.platform == "xros" {
                 // windows float in the room: no display coordinates (tap acts through accessibility)
@@ -913,7 +913,7 @@ fn snapshot_once(inst: &Instance, opt: SnapOpts) -> Result<Snapshot> {
         }
     }
     if n_answers == 0 {
-        bail!("{}: no app answers (is the phone running and booted to the home screen? its reader is host/simax)", inst.name);
+        bail!("{}: no app answers (is the device running and booted to the home screen? its reader is host/simax)", inst.name);
     }
     if snap.elements.is_empty() && !silent.is_empty() && spaces.is_empty() {
         bail!("{}: no process on screen answered: {}", inst.name, silent.join("; "));
@@ -1366,7 +1366,7 @@ pub fn tap(inst: &Instance, target: &str, hold_ms: u64, after: After) -> Result<
             (x, y, format!("@{} {} {}", e.r, e.role, e.label.as_deref().map(quote).unwrap_or_default()), Some(snap), sp)
         }
     };
-    anyhow::ensure!(simhid_up(inst), "{}: its touch input (host/simhid) does not answer (is the phone still starting?)", inst.name);
+    anyhow::ensure!(simhid_up(inst), "{}: its touch input (host/simhid) does not answer (is the device still starting?)", inst.name);
     touch_at(inst, sp, x, y, hold_ms);
     let verb = if hold_ms >= 500 { "long-pressed" } else { "tapped" };
     let mut did = format!("{verb} {what} at ({x:.0},{y:.0})");
@@ -1967,7 +1967,7 @@ pub fn terminate(inst: &Instance, bundle: &str, after: After) -> Result<Outcome>
 /// coordinates as the snapshot's)
 pub fn screenshot(inst: &Instance, div: u32) -> Result<(Vec<u8>, u32, u32)> {
     let mut ring = Ring::new(&screen_ring(inst));
-    let f = ring.latest().ok_or_else(|| anyhow!("{}: no frame (is the phone running?)", inst.name))?;
+    let f = ring.latest().ok_or_else(|| anyhow!("{}: no frame (is the device running?)", inst.name))?;
     // upright as the front app's interface stands (its points are the snapshot's), on the panel in use
     let rot = (panel(inst).0.map(|p| p.1).unwrap_or(0) + front_space(inst).rot) % 360;
     let div = div.max(1) as usize;

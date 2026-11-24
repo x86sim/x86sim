@@ -271,7 +271,7 @@ fn run() -> Result<()> {
             let sub = if args.is_empty() { "status".to_string() } else { args.remove(0) };
             // `sim stop var/device-a64-ram3` used to ignore the path and stop the --device default (the main phone)
             if matches!(sub.as_str(), "start" | "stop" | "restart") && !args.is_empty() {
-                bail!("sim {sub}: unexpected argument {:?} (the phone is --device DIR)", args[0]);
+                bail!("sim {sub}: unexpected argument {:?} (the device is --device DIR)", args[0]);
             }
             match sub.as_str() {
                 "status" => {

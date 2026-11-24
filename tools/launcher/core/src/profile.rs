@@ -886,7 +886,7 @@ fn cli_inner(args: &[String]) -> Result<()> {
                 }
             }),
         }
-        .ok_or_else(|| anyhow!("which phone? ({})", crate::instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", ")))?;
+        .ok_or_else(|| anyhow!("which device? ({})", crate::instance::list().iter().map(|i| i.name.clone()).collect::<Vec<_>>().join(", ")))?;
         (resolve(&inst, &app)?, Some(runtime.unwrap_or(inst.runtime_root.clone())))
     };
     let s = start(&target, period, (secs.ceil() as u32).saturating_add(60))?;

@@ -163,7 +163,7 @@ fn main() {
     let phone_id = phone.as_deref().map(|p| match x86sim_core::instance::find(p) {
         Some(i) => i.id,
         None => {
-            eprintln!("x86sim serve: no phone {p:?}");
+            eprintln!("x86sim serve: no device {p:?}");
             std::process::exit(2)
         }
     });

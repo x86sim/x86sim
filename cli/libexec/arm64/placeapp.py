@@ -76,7 +76,7 @@ def main():
             rows.append([int(f[0], 16), int(f[1], 16), int(f[2]), int(f[3]), f[4]])
     by_key = {r[4]: r for r in rows}
     changed = 0
-    # every phone's data dir (the jitcache dir is shared by every phone of this runtime), the installing phone's and
+    # every phone's data dir (the jitcache dir is shared by every device of this runtime), the installing device's and
     # the one named on the command line
     datas = set()
     root = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../.."))
