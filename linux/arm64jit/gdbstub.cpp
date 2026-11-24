@@ -516,9 +516,8 @@ void bp_clear_all() {
     for (int i = 0, n = g_bp_hi.load(); i < n; i++) if (u64 a = g_bp[i].load()) bp_clear(a);
 }
 
-std::string process_info() {
-    // the platform from the main executable's LC_BUILD_VERSION (7 iOS, 8 tvOS, 9 watchOS, 12 visionOS simulator)
-    const char *os = "iossimulator";
+// the platform from the main executable's LC_BUILD_VERSION (7 iOS, 8 tvOS, 9 watchOS, 12 visionOS simulator)
+uint32_t main_platform() {
     if (u64 mh = a64_main_header()) {
         uint32_t h[8];
         if (read_mem(mh, (uint8_t *)h, 32) == 32 && h[0] == 0xfeedfacf) {
@@ -526,14 +525,17 @@ std::string process_info() {
             for (uint32_t k = 0; k < h[4]; k++) {
                 uint32_t lc[3];
                 if (read_mem(p, (uint8_t *)lc, 12) != 12 || lc[1] < 8) break;
-                if (lc[0] == 0x32) {
-                    os = lc[2] == 8 ? "tvossimulator" : lc[2] == 9 ? "watchossimulator" : lc[2] == 12 ? "xrossimulator" : "iossimulator";
-                    break;
-                }
+                if (lc[0] == 0x32) return lc[2];
                 p += lc[1];
             }
         }
     }
+    return 7;
+}
+
+std::string process_info() {
+    const uint32_t pl = main_platform();
+    const char *os = pl == 8 ? "tvossimulator" : pl == 9 ? "watchossimulator" : pl == 12 ? "xrossimulator" : "iossimulator";
     return fmt("pid:%x;parent-pid:%x;real-uid:%x;real-gid:%x;effective-uid:%x;effective-gid:%x;cputype:100000c;cpusubtype:0;"
                "ptrsize:8;ostype:%s;vendor:apple;endian:little;",
                (int)getpid(), (int)getppid(), (int)getuid(), (int)getgid(), (int)geteuid(), (int)getegid(), os);
@@ -574,8 +576,12 @@ After handle(Io &io, std::string p, std::string &reply) {
         // version on purpose: lldb uses the libdyld SPI loader (jGetLoadedDynamicLibrariesInfos, a notifier with
         // another ABI; not implemented here) for iOS 10 and later and the all_image_infos one this stub serves below
         // that (DynamicLoaderDarwin::UseDYLDSPI). Expressions are compiled for the module's deployment target anyway,
-        // so 9.0 only has to parse.
-        reply += "os_version:9.0;";
+        // so the version only has to parse. The loader rule is per OS: iOS and tvOS below 10, watchOS below 3, and
+        // visionOS never (any version picks the SPI loader there: no os_version, lldb then keeps the all_image_infos
+        // loader; with 9.0 Apple TV / Vision Pro / Watch apps had no images, symbols or breakpoints)
+        const uint32_t pl = main_platform();
+        if (pl == 9) reply += "os_version:2.0;";
+        else if (pl != 12) reply += "os_version:9.0;";
         return After::Reply;
     }
     if (p == "qProcessInfo") { reply = process_info(); return After::Reply; }
