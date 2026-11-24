@@ -343,9 +343,28 @@ x86sim debug qa 1234                                    # a process by pid (x86s
 
 Breakpoints (by name, file and line, address), `step` / `next` / `finish`, `bt all`, `frame variable`, `register
 read`, `memory read`, `image list` / `image lookup` (every image of the dyld cache, read from the process), and stops at
-crashes (`EXC_BAD_ACCESS`, Swift traps as `EXC_BREAKPOINT`) work with the host's `/usr/bin/lldb` (LLVM 17 or later;
-`X86SIM_LLDB` names another). Detaching removes the breakpoints and the app runs on. The MCP tools `debug_start`,
+crashes (`EXC_BAD_ACCESS`, Swift traps as `EXC_BREAKPOINT`) work. Detaching removes the breakpoints and the app runs on. The MCP tools `debug_start`,
 `debug_command` and `debug_stop` keep an lldb session per phone. `tests/lldb/run.sh <phone>` checks it end to end.
+
+Which lldb: the Swift toolchain's (swift.org's, the one `x86sim dev setup` installs, or a distribution's `swift`
+package) when there is one, so Swift is debugged as in Xcode: `frame variable` shows Swift structs, classes, arrays,
+strings, dictionaries, optionals and enums, and `po` / `expression` evaluate Swift (`po self`, `expression point.x + 1`).
+As installed it does not start on most desktops (it links the `libpython3.X` it was built with, 3.12 for Swift 6.4), so
+the first `x86sim debug` sets it up, without root and without touching the system's Python (`x86sim dev setup lldb` does
+the same beforehand, `x86sim dev status` shows it):
+
+- a private CPython of that version (python-build-standalone's shared build, pinned by sha256, trimmed: about 75 MB) in
+  `~/.local/share/x86sim-dev/swift-lldb/python-3.X`, used through `LD_LIBRARY_PATH` / `PYTHONHOME` for lldb only;
+- `~/.local/share/x86sim-dev/swift-lldb/toolchain`, a view of the toolchain whose Swift resource dir is the Darwin one
+  of the SDK `x86sim dev setup` built (the Linux one's module maps collide with the iOS SDK's, so `po` failed). It holds
+  a copy of liblldb (lldb finds its resource dir from liblldb's real path): a reflink on btrfs / XFS (no space), else
+  about 230 MB.
+
+`x86sim debug` then points lldb at the phone's simulator SDK (`target.sdk-path`) and loads the app's dSYM (next to the
+`.app`, or `--symbols`): Swift's type info comes from the dSYM's `__swift_ast` and the binary's reflection metadata
+(`swiftc -g` makes both). Without the Swift toolchain it falls back to the host's `/usr/bin/lldb` (LLVM 17 or later) and
+says so: C and Objective-C as above, Swift frames symbolized but Swift values only as raw memory.
+`X86SIM_LLDB=/path/to/lldb` runs that lldb as is; `X86SIM_SWIFT_LLDB=0` skips the Swift one.
 
 How: the app's arm64 code runs translated by libarm64jit, so no debugserver can see it. libarm64jit has a GDB remote
 stub (`linux/arm64jit/gdbstub.cpp`) that speaks debugserver's dialect on `/run/user/<uid>/x86sim-dbg-<UDID>-<pid>.sock`.
@@ -354,10 +373,9 @@ and `SIGUSR1`. Breakpoints are substituted in the translator's code fetch, never
 
 Limits:
 
-- **Swift values**: upstream lldb has no Swift support, so Swift frames are symbolized but `frame variable` / `po` of
-  Swift values do not work (C and Objective-C do). Break on Swift functions by their mangled name or by address, or
-  with `@_cdecl` names. The Swift toolchain's lldb (`x86sim dev setup`) does not start on this host (it needs
-  libpython3.12).
+- **Swift**: needs the Swift toolchain (above) and a dSYM or the build's `.swiftmodule` for `po` / `expression`;
+  without them `frame variable` still works from the reflection metadata. The first Swift expression in a session
+  imports the app's modules from the SDK (some seconds). See the Swift row of `docs/PARITY.md` for what is checked.
 - **Functions run natively** never hit a breakpoint: `objc_msgSend` (inlined by the translator), everything in
   libsystem_kernel, libsystem_platform and libsystem_pthread (system calls, `pthread_*`, `_platform_memmove`: Darling's
   native code behind stubs), `malloc` and friends, and a few accelerated routines (LZFSE, ASTC, Swift conformance

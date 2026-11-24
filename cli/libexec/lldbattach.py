@@ -18,9 +18,10 @@ debugserver does. lldb connects with `process connect --plugin gdb-remote unix-c
   x86sim debug [PHONE] --cmd 'COMMAND' [--timeout S]   one lldb command: its output and the process state (JSON)
   x86sim debug [PHONE] --stop                          detach (the app runs on) and end the session (JSON)
 
-lldb: /usr/bin/lldb (X86SIM_LLDB overrides), LLVM 17 or later. The Swift toolchain's lldb (x86sim dev setup) does not
-start on this host (it needs libpython3.12): upstream lldb has no Swift expression support, so Swift values show as raw
-frames / memory; C, Objective-C, breakpoints, stepping, backtraces and registers work.
+lldb: the Swift toolchain's lldb when there is one (swiftlldb.py: set up on first use or by `x86sim dev setup lldb`,
+with a private libpython and the Darwin Swift resource dir): Swift values in frame variable, po and expression. Else
+/usr/bin/lldb (LLVM 17 or later): C, Objective-C, breakpoints, stepping, backtraces and registers; Swift values only as
+raw memory. X86SIM_LLDB=/path/to/lldb uses that one as is; X86SIM_SWIFT_LLDB=0 skips the Swift lldb.
 """
 import json, os, signal, socket, struct, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,9 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
 import x86config  # noqa: E402
 
-LLDB = os.environ.get("X86SIM_LLDB", "/usr/bin/lldb")
+import swiftlldb  # noqa: E402
+
+SYSTEM_LLDB = "/usr/bin/lldb"
 RUN = "/run/user/%d" % os.getuid()
 
 
@@ -188,21 +191,65 @@ def find_symbols(exe, given):
     return None
 
 
-def setup_commands(exe, sock, syms):
+def recorded_sdk(files):
+    """The simulator SDK named in the debug info (DW_AT_LLVM_sysroot, the Swift AST's -sdk) of the first of files that
+    has one and still exists"""
+    import re
+    for f in files:
+        if not f or not os.path.isfile(f):
+            continue
+        try:
+            with open(f, "rb") as fh:
+                data = fh.read(256 << 20)
+        except OSError:
+            continue
+        for m in re.finditer(rb'/[^\0\n"]*?Simulator[0-9.]*\.sdk(?=[/\0"])', data):
+            d = m.group(0).decode(errors="replace")
+            if os.path.isfile(os.path.join(d, "SDKSettings.json")):
+                return d
+    return None
+
+
+def choose_lldb(js=False):
+    """{lldb, info, python_exe, python_path, swift}: the lldb to run, its swiftlldb info (its environment:
+    swiftlldb.lldb_env(info)), the Python that loads its SB API module and that module's dir (None: `lldb -P`)"""
+    say = lambda m: print("x86sim debug: " + m, file=sys.stderr)   # noqa: E731 - stdout is JSON in --start mode
+    if os.environ.get("X86SIM_LLDB"):
+        p = os.environ["X86SIM_LLDB"]
+        if not os.path.exists(p):
+            die("X86SIM_LLDB=%s not found" % p, js=js)
+        return {"lldb": p, "info": {}, "python_exe": None, "python_path": None, "swift": None}
+    if os.environ.get("X86SIM_SWIFT_LLDB", "1") != "0":
+        info = swiftlldb.load()
+        if not info and swiftlldb.toolchains():
+            say("setting up the Swift toolchain's lldb (once; x86sim dev setup lldb does the same)")
+            info = swiftlldb.ensure(say)
+        if info:
+            return {"lldb": info["lldb"], "info": info, "python_exe": info.get("python_exe"),
+                    "python_path": info.get("python_path"), "swift": info}
+        say("no Swift lldb (%s): using %s, which shows Swift values only as raw memory" % (swiftlldb.status()["detail"], SYSTEM_LLDB))
+    if not os.path.exists(SYSTEM_LLDB):
+        die("%s not found (pacman -S lldb, x86sim dev setup swift, or X86SIM_LLDB=/path/to/lldb)" % SYSTEM_LLDB, js=js)
+    return {"lldb": SYSTEM_LLDB, "info": {}, "python_exe": None, "python_path": None, "swift": None}
+
+
+def setup_commands(exe, sock, syms, ll):
     c = ["settings set target.load-script-from-symbol-file false",
          "platform select remote-ios"]
+    plat = macho_platform(exe) if exe and os.path.exists(exe) else "ios"
+    if ll.get("swift"):
+        # the Swift expression parser compiles against the app's SDK (po, expression); without it frame variable works.
+        # The SDK the app was built with first: its module's serialized flags name that SDK's shims, and a second copy
+        # of the SDK would define every shim module twice.
+        sdk = recorded_sdk([syms, exe]) or swiftlldb.sim_sdk(plat)
+        if sdk and ll["swift"].get("resource_dir"):
+            c.append('settings set target.sdk-path "%s"' % sdk)
     if exe and os.path.exists(exe):
-        c.append('target create --arch arm64-apple-%s-simulator "%s"' % (macho_platform(exe), exe))
+        c.append('target create --arch arm64-apple-%s-simulator "%s"' % (plat, exe))
         if syms:
             c.append('target symbols add "%s"' % syms)
     c.append("process connect --plugin gdb-remote unix-connect://" + sock)
     return c
-
-
-def lldb_env():
-    env = dict(os.environ)
-    env.pop("DEBUGINFOD_URLS", None)   # a debuginfod lookup per image (0.4 s each, ~1000 images in an app)
-    return env
 
 
 # ---- the background session for the MCP server (lldb's Python SB API) -------------------------------------------------
@@ -210,9 +257,11 @@ def session_sock():
     return os.path.join(x86config.device(), "data", "tmp", "x86sim-lldb.sock")
 
 
-def serve(cmds, ready_fd):
-    """Runs in the background: an SBDebugger with the process attached, one command per connection."""
-    sys.path.insert(0, subprocess.run([LLDB, "-P"], capture_output=True, text=True).stdout.strip())
+def serve(cmds, ready_fd, lldb_bin):
+    """Runs in the background (lldbattach.py --serve-session, under the Python lldb's module is built for): an
+    SBDebugger with the process attached, one command per connection."""
+    if not any(os.path.isdir(os.path.join(p, "lldb")) for p in sys.path if p):
+        sys.path.insert(0, subprocess.run([lldb_bin, "-P"], capture_output=True, text=True).stdout.strip())
     import lldb
     dbg = lldb.SBDebugger.Create()
     dbg.SetAsync(True)
@@ -330,6 +379,11 @@ def ask(req, timeout):
 
 
 def main(a):
+    if a[:1] == ["--serve-session"]:   # the background session (mode start), in its own process
+        try:
+            serve(json.loads(a[3]), int(a[1]), a[2])
+        finally:
+            os._exit(0)
     mode, target, launch, wait, syms, batch, ocmds, extra, timeout = "lldb", None, False, False, None, False, [], [], 30.0
     while a:
         x = a.pop(0)
@@ -365,40 +419,39 @@ def main(a):
         return ask({"cmd": "__stop__"}, 10)
     if not target:
         die(__doc__, 2)
-    if not os.path.exists(LLDB):
-        die("%s not found (pacman -S lldb, or X86SIM_LLDB=/path/to/lldb)" % LLDB, js=js)
+    ll = choose_lldb(js)
     u = udid()
     gpid, exe = resolve(target, launch, wait)
     sock = ensure_stub(u, gpid)
-    cmds = setup_commands(exe, sock, find_symbols(exe, syms))
+    cmds = setup_commands(exe, sock, find_symbols(exe, syms), ll)
+    env = swiftlldb.lldb_env(ll["info"])
     if mode == "start":
         if session_alive():
             die("a debug session is already running on this phone (x86sim debug --stop)", js=True)
+        # the session runs under the Python that lldb's SB API module is built for (the Swift lldb's private one)
+        py = ll["python_exe"] or sys.executable
+        if ll["python_path"]:
+            env["PYTHONPATH"] = ll["python_path"]
+        env["X86SIM_DEVICE"] = x86config.device()
         r, w = os.pipe()
-        if os.fork() == 0:
-            os.close(r)
-            os.setsid()
-            with open(session_sock() + ".pid", "w") as f:
-                f.write(str(os.getpid()))
-            log = os.open(os.path.join(x86config.device(), "data", "tmp", "x86sim-lldb.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            os.dup2(log, 1); os.dup2(log, 2)
-            os.environ.clear(); os.environ.update(lldb_env())
-            try:
-                serve(cmds + ocmds, w)
-            finally:
-                os._exit(0)
+        logf = os.path.join(x86config.device(), "data", "tmp", "x86sim-lldb.log")
+        with open(logf, "w") as log:
+            p = subprocess.Popen([py, os.path.abspath(__file__), "--serve-session", str(w), ll["lldb"], json.dumps(cmds + ocmds)],
+                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, pass_fds=(w,), start_new_session=True)
+        with open(session_sock() + ".pid", "w") as f:
+            f.write(str(p.pid))
         os.close(w)
         out = os.fdopen(r).readline().strip()
         if not out:
-            die("the lldb session ended at once (see %s)" % os.path.join(x86config.device(), "data/tmp/x86sim-lldb.log"), js=True)
+            die("the lldb session ended at once (see %s)" % logf, js=True)
         res = json.loads(out)
-        res.update({"pid": gpid, "socket": sock, "executable": exe})
+        res.update({"pid": gpid, "socket": sock, "executable": exe, "lldb": ll["lldb"], "swift": bool(ll["swift"])})
         print(json.dumps(res))
         return
-    argv = [LLDB] + (["-b"] if batch else [])
+    argv = [ll["lldb"]] + (["-b"] if batch else [])
     for c in cmds + ocmds:
         argv += ["-o", c]
-    os.execve(LLDB, argv + extra, lldb_env())
+    os.execve(ll["lldb"], argv + extra, env)
 
 
 if __name__ == "__main__":

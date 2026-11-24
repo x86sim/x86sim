@@ -569,6 +569,13 @@ After handle(Io &io, std::string p, std::string &reply) {
         char hn[256] = "x86sim";
         gethostname(hn, sizeof hn);
         reply = "cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;hostname:" + hexstr(hn) + ";";
+        // os_version: the Swift lldb writes it into each expression as @available(iOS <version>, *); without one it is
+        // "iOS 0", which does not parse, and every expression in a class context fails. It is not the runtime's
+        // version on purpose: lldb uses the libdyld SPI loader (jGetLoadedDynamicLibrariesInfos, a notifier with
+        // another ABI; not implemented here) for iOS 10 and later and the all_image_infos one this stub serves below
+        // that (DynamicLoaderDarwin::UseDYLDSPI). Expressions are compiled for the module's deployment target anyway,
+        // so 9.0 only has to parse.
+        reply += "os_version:9.0;";
         return After::Reply;
     }
     if (p == "qProcessInfo") { reply = process_info(); return After::Reply; }
