@@ -140,7 +140,9 @@ pub fn contrast_in(px: &Pixels, frame: &[f64; 4], fg: Option<[f64; 4]>) -> Optio
     let (cnt, sum) = hist.values().max_by_key(|v| v.0)?;
     let bg = [(sum[0] / cnt) as u8, (sum[1] / cnt) as u8, (sum[2] / cnt) as u8];
     let mut differ: Vec<(f64, [u8; 3])> = all.iter().map(|c| (ratio(*c, bg), *c)).filter(|(r, _)| *r > 1.15).collect();
-    if differ.len() * 100 < all.len() || differ.len() < 4 {
+    // a few samples of text in a wide frame are text too: a short label across an Apple TV's 1880 pt row covers
+    // under 1% of it (the old floor); 0.25% and 8 samples still keep stray pixels out
+    if differ.len() * 400 < all.len() || differ.len() < 8 {
         return None;
     }
     if let Some(f) = fg {
@@ -566,5 +568,22 @@ mod tests {
         assert_eq!(bg, [255, 255, 255]);
         assert_eq!(fg, [0xAA, 0xAA, 0xAA]);
         assert!((r - 2.32).abs() < 0.05, "{r}");
+    }
+
+    #[test]
+    fn contrast_short_text_in_wide_frame() {
+        // "Low contrast text" on an Apple TV: #BBBBBB glyphs over 120 of the frame's 1880 points (0.7% of its pixels)
+        let (w, h) = (1880usize, 24usize);
+        let mut rgb = vec![255u8; w * h * 3];
+        for y in 10..14 {
+            for x in (0..120).filter(|x| x % 3 != 0) {
+                let o = (y * w + x) * 3;
+                rgb[o..o + 3].copy_from_slice(&[0xBB, 0xBB, 0xBB]);
+            }
+        }
+        let px = Pixels { w, h, rgb, sx: 1.0, sy: 1.0 };
+        let (r, _, bg) = contrast_in(&px, &[0.0, 0.0, 1880.0, 24.0], Some([187.0, 187.0, 187.0, 1.0])).unwrap();
+        assert_eq!(bg, [255, 255, 255]);
+        assert!(r < 2.0, "{r}");
     }
 }

@@ -7,7 +7,7 @@
 #    UIKitCore (-[UILabel setText:], AOT-translated code); detach
 # 3. (--settings) attach to Settings (com.apple.Preferences, launched first): bt all; detach
 # On every platform: the phone's (tvOS, watchOS, visionOS) build of dbgapp (build-app.sh X86SIM_PLATFORM); on watchOS
-# the AOT breakpoint is CoreFoundation's CFStringCreateWithFormatAndArguments (no UILabel there).
+# the AOT breakpoint is CoreFoundation's __CFRunLoopDoTimer (dbgapp's timer; no UILabel there).
 # Every check prints "X86TEST lldb <check> PASS|FAIL"; exit status 1 if one failed. Output in $X86SIM_SCRATCH/lldb-test[-<platform>]/.
 X86SIM_ROOT=${X86SIM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}; . "$X86SIM_ROOT/cli/lib/config.sh"
 PHONE=$1; shift || { echo "usage: $0 PHONE [--no-build] [--settings]" >&2; exit 2; }
@@ -20,7 +20,7 @@ OUT=$X86SIM_SCRATCH/lldb-test$PSUF; mkdir -p "$OUT"
 APP=$X86SIM_SCRATCH/apps/dbgapp$PSUF.app
 [ $build = 1 ] && { X86SIM_PLATFORM=$plat "$(dirname "$0")/build-app.sh" >&2 || exit 1; }
 AOTBP="-[UILabel setText:]" AOTRE="UIKitCore\`-\[UILabel setText:\]" MAINRE=UIApplicationMain
-[ "$plat" = watchos ] && AOTBP=CFStringCreateWithFormatAndArguments AOTRE="CoreFoundation\`CFStringCreateWithFormatAndArguments" MAINRE=WKApplicationMain
+[ "$plat" = watchos ] && AOTBP=__CFRunLoopDoTimer AOTRE="CoreFoundation\`__CFRunLoopDoTimer" MAINRE=WKApplicationMain
 P() { "$X" --phone "$PHONE" "$@"; }
 P install "$APP" >&2 || exit 1
 fail=0
