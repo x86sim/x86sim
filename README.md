@@ -631,9 +631,12 @@ console messages or requests (with status codes).
 - The phone side is the runtime's `webinspectord`, started on demand at the first inspect (the `webinspector`
   feature, on by default; nothing runs until then). Its socket is `/run/user/<uid>/x86sim-rwi-<UDID>.sock` and speaks
   Apple's Remote Web Inspector protocol (`tools/launcher/core/src/rwi.rs`).
-- The frontend is the one WebKitGTK ships (webkit2gtk-4.1 or webkitgtk-6.0 must be installed; it is extracted once
-  into `~/.cache/x86sim/webinspector`), or a WebInspectorUI directory given with `X86SIM_INSPECTOR_UI`. It is a
-  newer or older WebKit than the phone's, so a panel may miss a command now and then. The MCP tools work without it.
+- The frontend is WebKit's own (WebInspectorUI, as built in WebKitGTK 2.54.3). The AppImage carries it, so nothing
+  needs installing. Lookup order: `X86SIM_INSPECTOR_UI` (a WebInspectorUI directory, e.g. a WebKit checkout's),
+  the AppImage's copy, a checkout's `tools/launcher/target/webinspector` (made by `build/webinspector.sh`: a pinned
+  WebKitGTK package, sha256 checked), then the host's WebKitGTK (webkit2gtk-4.1 or webkitgtk-6.0, extracted once into
+  `~/.cache/x86sim/webinspector`). `x86sim serve`'s log names the copy in use. It is a newer or older WebKit than the
+  phone's, so a panel may miss a command now and then. The MCP tools work without it.
 
 ## Building and shipping apps
 

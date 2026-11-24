@@ -4,8 +4,9 @@
 //! - `GET /inspect/<phone>`: the phone's inspectable pages (crate::rwi::targets), each a link to the inspector
 //! - `GET /api/web/<phone>`: the same as JSON
 //! - `GET /inspector/<path>`: WebKit's own Web Inspector frontend (WebInspectorUI: Main.html and its scripts), the files
-//!   the host's WebKitGTK carries as GResources (`gresource extract`, once, into a cache dir), or a directory given
-//!   with X86SIM_INSPECTOR_UI (e.g. a WebKit checkout's Source/WebInspectorUI). Its BrowserInspectorFrontendHost opens
+//!   from X86SIM_INSPECTOR_UI (e.g. a WebKit checkout's Source/WebInspectorUI), else the copy x86Sim ships (release
+//!   AppImages; build/webinspector.sh in a checkout: WebKitGTK's build of it, pinned), else the host WebKitGTK's
+//!   GResources (`gresource extract`, once, into a cache dir). Its BrowserInspectorFrontendHost opens
 //!   a WebSocket to `?ws=<host>/<path>` and speaks the WebKit inspector protocol over it, so no translation is needed;
 //!   Main.js is served with `wss://` behind an HTTPS tunnel instead of its hardcoded `ws://`.
 //! - `GET /inspect-ws/<phone>/<app id>/<page id>`: that WebSocket, bridged to an RWI session on the page
@@ -375,20 +376,47 @@ fn webkit_lib() -> Option<PathBuf> {
     dirs.iter().flat_map(|d| names.iter().map(move |n| Path::new(d).join(n))).find(|p| p.exists())
 }
 
-/// A directory with UserInterface/Main.html (and Localizations/): X86SIM_INSPECTOR_UI, else WebKitGTK's resources
-/// extracted once into ~/.cache/x86sim/webinspector/<library>-<size>
+/// The frontend copies shipped with x86Sim, first found wins: the AppImage's (AppRun copies usr/share/x86sim/webinspector
+/// next to the payload, `<app>/webinspector`; `$APPDIR/usr/share/x86sim/webinspector` while the AppImage is mounted),
+/// then a checkout's build output (build/webinspector.sh: tools/launcher/target/webinspector). Found from the
+/// running binary (`<root>/tools/launcher/target/release/<bin>`), so a worktree's build finds its own.
+fn bundled_dirs() -> Vec<(PathBuf, &'static str)> {
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    let up = |n: usize| exe.as_deref().and_then(|e| e.ancestors().nth(n));
+    let mut v = Vec::new();
+    v.extend(up(5).map(|root| (root.join("webinspector"), "AppImage")));
+    v.extend(std::env::var_os("APPDIR").map(|a| (PathBuf::from(a).join("usr/share/x86sim/webinspector"), "AppImage")));
+    v.extend(up(2).map(|target| (target.join("webinspector"), "build output")));
+    v
+}
+
+/// A directory with UserInterface/Main.html (and Localizations/): X86SIM_INSPECTOR_UI, else the copy x86Sim ships
+/// (bundled_dirs), else the host WebKitGTK's resources extracted once into ~/.cache/x86sim/webinspector/<library>-<size>.
+/// The choice is logged once (stderr: x86sim serve's log).
 pub fn ui_dir() -> anyhow::Result<PathBuf> {
     static CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
     let mut c = CACHE.lock().unwrap();
     if let Some(p) = c.as_ref() {
         return Ok(p.clone());
     }
-    if let Some(d) = std::env::var_os("X86SIM_INSPECTOR_UI").map(PathBuf::from) {
+    let (d, from) = find_ui_dir()?;
+    let ver = std::fs::read_to_string(d.join("VERSION")).map(|v| format!(", {}", v.trim())).unwrap_or_default();
+    eprintln!("x86sim inspect: Web Inspector frontend: {} ({from}{ver})", d.display());
+    *c = Some(d.clone());
+    Ok(d)
+}
+
+fn find_ui_dir() -> anyhow::Result<(PathBuf, &'static str)> {
+    if let Some(d) = std::env::var_os("X86SIM_INSPECTOR_UI").filter(|v| !v.is_empty()).map(PathBuf::from) {
         anyhow::ensure!(d.join("UserInterface/Main.html").exists(), "X86SIM_INSPECTOR_UI={}: no UserInterface/Main.html there", d.display());
-        *c = Some(d.clone());
-        return Ok(d);
+        return Ok((d, "X86SIM_INSPECTOR_UI"));
     }
-    let lib = webkit_lib().ok_or_else(|| anyhow::anyhow!("WebKitGTK (webkit2gtk-4.1 or webkitgtk-6.0) is not installed; install it, or set X86SIM_INSPECTOR_UI to a WebInspectorUI directory"))?;
+    if let Some((d, from)) = bundled_dirs().into_iter().find(|(d, _)| d.join("UserInterface/Main.html").exists()) {
+        return Ok((d, from));
+    }
+    let lib = webkit_lib().ok_or_else(|| {
+        anyhow::anyhow!("no Web Inspector frontend: this build has none (build/webinspector.sh makes it) and WebKitGTK (webkit2gtk-4.1 or webkitgtk-6.0) is not installed; run build/webinspector.sh, install WebKitGTK, or set X86SIM_INSPECTOR_UI to a WebInspectorUI directory")
+    })?;
     let real = std::fs::canonicalize(&lib).unwrap_or(lib.clone());
     let size = std::fs::metadata(&real).map(|m| m.len()).unwrap_or(0);
     let cache = std::env::var_os("XDG_CACHE_HOME")
@@ -400,8 +428,7 @@ pub fn ui_dir() -> anyhow::Result<PathBuf> {
     if !cache.join("UserInterface/Main.html").exists() {
         extract(&real, &cache)?;
     }
-    *c = Some(cache.clone());
-    Ok(cache)
+    Ok((cache, "host WebKitGTK"))
 }
 
 fn extract(lib: &Path, dest: &Path) -> anyhow::Result<()> {
