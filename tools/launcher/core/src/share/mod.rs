@@ -214,14 +214,24 @@ pub fn start(opts: &Options) -> Result<State> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let lf = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log)?;
     lf.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    let mut cmd = std::process::Command::new("setsid");
-    cmd.arg(&exe).args(args_of(opts)).stdin(std::process::Stdio::null()).stdout(lf.try_clone()?).stderr(lf);
-    let mut child = cmd.spawn().context("starting x86sim-serve")?;
-    // setsid execs in place (no fork when we are not a group leader): the child's pid is the server's
-    let pid = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    // A user service of its own when systemd is there: started from a terminal, an editor or an agent, the server would
+    // otherwise live in that caller's cgroup and die with it (systemd-oomd killing an agent's scope took the user's
+    // shared server and its tunnel down). Without systemd (or a caller with a private XDG_RUNTIME_DIR, which cannot
+    // reach the user manager): its own session, as before.
+    let pid = match crate::sim::user_systemd().then(|| start_unit(&exe, opts, &log)).transpose()? {
+        Some(pid) => pid,
+        None => {
+            let mut cmd = std::process::Command::new("setsid");
+            cmd.arg(&exe).args(args_of(opts)).stdin(std::process::Stdio::null()).stdout(lf.try_clone()?).stderr(lf);
+            let mut child = cmd.spawn().context("starting x86sim-serve")?;
+            // setsid execs in place (no fork when we are not a group leader): the child's pid is the server's
+            let pid = child.id();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            pid
+        }
+    };
     let end = Instant::now() + Duration::from_secs(40);
     while Instant::now() < end {
         std::thread::sleep(Duration::from_millis(150));
@@ -237,6 +247,54 @@ pub fn start(opts: &Options) -> Result<State> {
         }
     }
     read_state().context("x86sim-serve did not come up (see ~/.local/state/x86sim/serve.log)")
+}
+
+/// The unit of the server for this XDG_RUNTIME_DIR (one server per user and runtime dir, as its state file)
+fn unit_name() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::env::var("XDG_RUNTIME_DIR").unwrap_or_default().hash(&mut h);
+    format!("x86sim-serve-{:08x}", h.finish() as u32)
+}
+
+/// x86sim-serve as a transient systemd user service (`systemd-run --user`), with this process's environment and its
+/// output appended to the log; returns the server's pid (the unit's main process)
+fn start_unit(exe: &std::path::Path, opts: &Options, log: &std::path::Path) -> Result<u32> {
+    let unit = unit_name();
+    let sctl = |args: &[&str]| {
+        std::process::Command::new("systemctl").arg("--user").args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()
+    };
+    // a unit left from a server that lost its state file: ended first (no state = no server to keep)
+    let _ = sctl(&["stop", &format!("{unit}.service")]);
+    let _ = sctl(&["reset-failed", &format!("{unit}.service")]);
+    let mut cmd = std::process::Command::new("systemd-run");
+    cmd.args(["--user", "--collect", "--quiet", "--unit", &unit, "-p", "KillMode=mixed"])
+        .arg("-p")
+        .arg(format!("StandardOutput=append:{}", log.display()))
+        .arg("-p")
+        .arg(format!("StandardError=append:{}", log.display()));
+    if let Ok(d) = std::env::current_dir() {
+        cmd.arg("-p").arg(format!("WorkingDirectory={}", d.display()));
+    }
+    for (k, v) in std::env::vars() {
+        if !v.contains('\n') && !k.starts_with("SYSTEMD_") && k != "_" {
+            cmd.arg("-E").arg(format!("{k}={v}"));
+        }
+    }
+    cmd.arg(exe).args(args_of(opts)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    let out = cmd.output().context("systemd-run x86sim-serve")?;
+    anyhow::ensure!(out.status.success(), "systemd-run x86sim-serve: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let o = std::process::Command::new("systemctl").args(["--user", "show", "-p", "MainPID", "--value", &format!("{unit}.service")]).output()?;
+        if let Ok(pid) = String::from_utf8_lossy(&o.stdout).trim().parse::<u32>() {
+            if pid > 0 {
+                return Ok(pid);
+            }
+        }
+        anyhow::ensure!(Instant::now() < end, "x86sim-serve: no main process in {unit}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Stops the server (its tunnels with it). False if none ran.
