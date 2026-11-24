@@ -1,5 +1,5 @@
 //! Phones: a grid of cards for phones that can start (live screen, state, memory/CPU, Start/Stop), and a compact list of
-//! phones waiting for an iOS version, grouped by version with one Download each. "Add phone" dialog.
+//! phones waiting for an iOS version, grouped by version with one Download each. "Add device" dialog.
 use crate::theme::*;
 use crate::{viewer, AddDialog, App, View};
 use eframe::egui;

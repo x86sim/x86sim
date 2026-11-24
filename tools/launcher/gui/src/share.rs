@@ -128,7 +128,7 @@ impl App {
         };
         let ctx = ui.ctx().clone();
         let id = inst.id.clone();
-        ui.label(muted("Watch and drive this phone from a browser: here, on your tailnet or anywhere. Every link carries a token."));
+        ui.label(muted("Watch and drive this device from a browser: here, on your tailnet or anywhere. Every link carries a token."));
         ui.add_space(S2);
         if let Some(b) = &busy {
             busy_line(ui, b);

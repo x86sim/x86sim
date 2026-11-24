@@ -155,7 +155,7 @@ impl App {
             });
         };
         let mut cmd: Option<(Vec<String>, String)> = None;
-        ui.label(muted(if running { "Changes apply at once." } else if off { "The phone is off: changes apply at its next start." } else { "Wait until it has started or stopped." }));
+        ui.label(muted(if running { "Changes apply at once." } else if off { "The device is off: changes apply at its next start." } else { "Wait until it has started or stopped." }));
         field(ui, "Appearance", "Light or Dark, as Features > Toggle Appearance / simctl ui appearance");
         let opts = [("light", "Light"), ("dark", "Dark")];
         if let Some(i) = segmented(ui, &opts.map(|o| o.1), opts.iter().position(|o| o.0 == st.appearance), idle) {
@@ -245,7 +245,7 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 let tip = if off { "" } else { "Stop it first" };
                 let r = ui.add_enabled(off && working.is_none() && !inst.is_default, Btn::secondary("Erase…").icon(icon::ERASER).small());
-                if r.on_disabled_hover_text(if inst.is_default { "The main phone: x86sim erase --force" } else { tip }).clicked() {
+                if r.on_disabled_hover_text(if inst.is_default { "The main device: x86sim erase --force" } else { tip }).clicked() {
                     self.devctl.confirm_erase = Some(id.clone());
                 }
                 let r = ui.add_enabled(off && working.is_none(), Btn::secondary("Clone…").icon(icon::COPY).small());

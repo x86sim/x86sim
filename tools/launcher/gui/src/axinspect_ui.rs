@@ -261,7 +261,7 @@ pub fn section(ui: &mut egui::Ui, inst: &Instance, live: bool) {
         if ui.checkbox(&mut all_frames, "All frames").changed() {
             st.lock().unwrap().all_frames = all_frames;
         }
-        if ui.checkbox(&mut dynamic_type, "Dynamic Type").on_hover_text("The audit also re-checks at the largest accessibility text size (the phone's text size changes for a few seconds, then goes back)").changed() {
+        if ui.checkbox(&mut dynamic_type, "Dynamic Type").on_hover_text("The audit also re-checks at the largest accessibility text size (the device's text size changes for a few seconds, then goes back)").changed() {
             st.lock().unwrap().dynamic_type = dynamic_type;
         }
     });

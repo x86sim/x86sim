@@ -103,7 +103,7 @@ let currentPhone = null;
 function dashboard() {
   currentPhone = null;
   $("#crumb").textContent = "Phones";
-  document.title = "x86Sim Phones";
+  document.title = "x86Sim Devices";
   const control = ME.role === "control";
   // what the viewer picked, kept in this browser (a remembered convenience only: the page works without it)
   const PREF = "x86sim.dash";
@@ -125,7 +125,7 @@ function dashboard() {
   };
 
   // toolbar: search, device types, sort, grid / list
-  const search = h("input", { type: "search", class: "dsearch", placeholder: "Search name or model", value: pref.q, "aria-label": "Search phones" });
+  const search = h("input", { type: "search", class: "dsearch", placeholder: "Search name or model", value: pref.q, "aria-label": "Search devices" });
   const chips = h("div", { class: "chips", role: "group", "aria-label": "Device type" });
   const sortSel = h("select", { "aria-label": "Sort" }, SORTS.map(([v, t]) => h("option", { value: v, text: t, selected: pref.sort === v })));
   const viewGrid = h("button", { class: "btn small", text: "Grid", title: "Cards" });
@@ -223,8 +223,8 @@ function dashboard() {
     }
     for (const [id, c] of cards) if (!shown.some((p) => p.id === id)) { c.el.remove(); if (!phones.some((p) => p.id === id)) cards.delete(id); }
     empty.hidden = shown.length > 0;
-    empty.textContent = !phones.length ? "No phones yet. Make one in the x86Sim launcher or with `x86sim device create`."
-      : "No phone matches the search or the device type.";
+    empty.textContent = !phones.length ? "No devices yet. Make one in the x86Sim launcher or with `x86sim device create`."
+      : "No device matches the search or the device type.";
   }
 
   async function tick() {
@@ -303,7 +303,7 @@ function phoneView(id) {
   }
   function wantWidth() {
     const r = stage.getBoundingClientRect();
-    // the picture's shape as it arrives (a turned phone is wide), else the screen's
+    // the picture's shape as it arrives (a turned device is wide), else the screen's
     const scr = info?.screen || [1206, 2622];
     const aspect = fw && fh ? fw / fh : scr[0] / scr[1];
     const css = Math.min(r.width - 24, (r.height - 24) * aspect) * (window.devicePixelRatio || 1);
@@ -531,7 +531,7 @@ function phoneView(id) {
       buildSide();
     } else if (m.t === "state") {
       lastState = m;
-      if (!m.running) { overlay.hidden = false; overlay.textContent = control ? "The phone is off. Start it from the dashboard." : "The phone is off."; }
+      if (!m.running) { overlay.hidden = false; overlay.textContent = control ? "The device is off. Start it from the dashboard." : "The device is off."; }
       updateSide();
     } else if (m.t === "expired") {
       alive = false;
@@ -574,7 +574,7 @@ function phoneView(id) {
         parts.push(group("Buttons", hold("home", "Home"), hold("lock", "Lock"), hold("volup", "Vol +"), hold("voldown", "Vol −"), hold("siri", "Siri"), hold("action", "Action"),
           btn("Switcher", "App Switcher", () => send({ t: "sys", a: "app_switcher" }))));
         parts.push(group("Device", btn("Rotate ←", "Rotate left", () => send({ t: "rotate", dir: "left" })), btn("Rotate →", "Rotate right", () => send({ t: "rotate", dir: "right" })),
-          btn("Shake", "Device > Shake", () => send({ t: "shake" })), btn("Paste…", "Type text into the phone", openPaste)));
+          btn("Shake", "Device > Shake", () => send({ t: "shake" })), btn("Paste…", "Type text into the device", openPaste)));
         parts.push(group("Keyboard", btn("Software", "I/O > Keyboard > Toggle Software Keyboard (Cmd-K): the on-screen keyboard while a text field is focused", () => send({ t: "sys", a: "soft_keyboard" })),
           btn("Hardware", "I/O > Keyboard > Connect Hardware Keyboard (Shift-Cmd-K): connect / disconnect; disconnected, the software keyboard shows on every focus", () => send({ t: "sys", a: "hw_keyboard" }))));
         if (info.two_screens) {
@@ -582,20 +582,20 @@ function phoneView(id) {
           parts.push(h("div", {}, h("h4", { text: "Fold" }), fold));
         }
       }
-      if (p !== "ios") parts.push(group("Text", btn("Paste…", "Type text into the phone", openPaste)));
+      if (p !== "ios") parts.push(group("Text", btn("Paste…", "Type text into the device", openPaste)));
     }
-    soundBtn = btn("", "The phone's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
-    quickSound = btn("", "The phone's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
+    soundBtn = btn("", "The device's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
+    quickSound = btn("", "The device's sound in this browser", () => (soundOn ? soundStop() : soundStart()));
     const q = [];
     if (control && (p === "ios" || p === "xros")) q.push(hold("home", "Home"));
     if (control && p === "ios") q.push(btn("Switcher", "App Switcher", () => send({ t: "sys", a: "app_switcher" })));
     if (control && p === "tvos") q.push(hold("menu", "Back"), hold("tv", "TV"));
     if (control && p === "watchos") q.push(hold("home", "Crown"), hold("side", "Side"));
-    if (control) q.push(btn("Type…", "Type text into the phone", openPaste));
+    if (control) q.push(btn("Type…", "Type text into the device", openPaste));
     q.push(quickSound);
     quick.replaceChildren(...q);
     const volIn = h("input", { type: "range", min: 0, max: 1, step: 0.05, value: volume, title: "Volume (this browser only)", class: "vol", oninput: (e) => setVolume(Number(e.target.value)) });
-    micBtn = control ? btn("", canMic ? "Your microphone into the phone (asks the browser for it)" : "The microphone needs HTTPS (or localhost) and a browser with AudioWorklet", () => (mic ? micStop() : micStart())) : null;
+    micBtn = control ? btn("", canMic ? "Your microphone into the device (asks the browser for it)" : "The microphone needs HTTPS (or localhost) and a browser with AudioWorklet", () => (mic ? micStop() : micStart())) : null;
     if (micBtn && !canMic) micBtn.disabled = true;
     parts.push(group("Sound", soundBtn, volIn, micBtn));
     updateSound();
@@ -610,9 +610,9 @@ function phoneView(id) {
     const fSel = h("select", { onchange: (e) => { fps = Number(e.target.value); save(); connect(); } }, [15, 30, 60].map((f) => h("option", { value: f, selected: f === fps, text: f + " fps" })));
     parts.push(h("div", {}, h("h4", { text: "Stream" }), h("div", { class: "btns" }, qSel, cSel, fSel), stats));
     if (control) parts.push(h("div", { class: "kbd" }, ...keyHelp(p)));
-    if (control) parts.push(group("Share", btn("Share this phone…", "", () => openShare(id))));
+    if (control) parts.push(group("Share", btn("Share this device…", "", () => openShare(id))));
     if (control && p !== "watchos") parts.push(webPanel());
-    parts.push(h("div", { class: "btns" }, h("a", { class: "btn small", href: "#/", text: "← All phones" })));
+    parts.push(h("div", { class: "btns" }, h("a", { class: "btn small", href: "#/", text: "← All devices" })));
     side.replaceChildren(...parts);
   }
   // Web Inspector: the phone's inspectable pages (Safari, WKWebViews with isInspectable), each with an Inspect link
@@ -637,7 +637,7 @@ function phoneView(id) {
   }
   function keyHelp(p) {
     if (p === "xros") return [h("h4", { text: "Keys" }), ...[["Mouse", "the system pointer: hover, click, drag"], ["Wheel", "scroll where it points"], ["Keys", "the keyboard (click the screen first)"], ["Ctrl+V", "paste"]].map(([a, b]) => h("div", {}, h("b", { text: a }), " " + b))];
-    const l = [["Click / drag", "touch"], ["Alt + drag", "pinch / rotate"], ["Shift + drag", "two-finger pan"], ["Wheel", p === "watchos" ? "Digital Crown" : p === "tvos" ? "swipe the remote" : "scroll"], ["Keys", "the phone's keyboard (click the screen first)"], ["Ctrl+V", "paste"], ["F1 / F2 / F3 / F4", p === "tvos" ? "TV / play / vol" : "home / lock / vol"]];
+    const l = [["Click / drag", "touch"], ["Alt + drag", "pinch / rotate"], ["Shift + drag", "two-finger pan"], ["Wheel", p === "watchos" ? "Digital Crown" : p === "tvos" ? "swipe the remote" : "scroll"], ["Keys", "the device's keyboard (click the screen first)"], ["Ctrl+V", "paste"], ["F1 / F2 / F3 / F4", p === "tvos" ? "TV / play / vol" : "home / lock / vol"]];
     if (p === "tvos") l.splice(0, 3, ["Arrows, Enter, Esc", "remote: move, select, back"], ["Click", "select"]);
     return [h("h4", { text: "Keys" }), ...l.map(([a, b]) => h("div", {}, h("b", { text: a }), " " + b))];
   }
@@ -657,7 +657,7 @@ function phoneView(id) {
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     rec.onstop = () => {
       const blob = new Blob(chunks, { type: type.split(";")[0] });
-      const a = h("a", { href: URL.createObjectURL(blob), download: `${info?.name || "phone"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${type.includes("mp4") ? "mp4" : "webm"}` });
+      const a = h("a", { href: URL.createObjectURL(blob), download: `${info?.name || "device"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${type.includes("mp4") ? "mp4" : "webm"}` });
       document.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
       rec = null;
@@ -908,7 +908,7 @@ async function openShare(phone) {
   const sel = $("#linkPhone");
   try {
     const ps = await api("/api/phones");
-    sel.replaceChildren(h("option", { value: "", text: "Every phone" }), ...ps.map((p) => h("option", { value: p.id, text: p.name, selected: p.id === phone })));
+    sel.replaceChildren(h("option", { value: "", text: "Every device" }), ...ps.map((p) => h("option", { value: p.id, text: p.name, selected: p.id === phone })));
   } catch {}
   $("#linkOut").replaceChildren();
   $("#linkMake").onclick = makeLink;
@@ -961,7 +961,7 @@ async function refreshLinks() {
   try {
     const l = await api("/api/links");
     box.replaceChildren(...(l.length ? l.map((x) => h("div", { class: "tunnel" },
-      h("span", { class: "info", text: `${x.role === "control" ? "drive" : "watch"} · ${x.phone || "every phone"} · until ${x.expires ? new Date(x.expires * 1000).toLocaleString() : "server stop"}` }),
+      h("span", { class: "info", text: `${x.role === "control" ? "drive" : "watch"} · ${x.phone || "every device"} · until ${x.expires ? new Date(x.expires * 1000).toLocaleString() : "server stop"}` }),
       h("button", { type: "button", class: "btn small danger", text: "Revoke", onclick: async () => { await api("/api/links/revoke", { id: x.id }); refreshLinks(); } }))) : ["None"]));
   } catch (e) { box.textContent = e.message; }
 }

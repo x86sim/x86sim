@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="robots" content="noindex">
-<title>x86Sim Phones</title>
+<title>x86Sim Devices</title>
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="axinspect.css">
 </head>
@@ -25,12 +25,12 @@
     <section>
       <h3>Remote access</h3>
       <div id="tunnels" class="tunnels"></div>
-      <p class="hint">Tailscale: HTTPS on your tailnet only. Funnel and Cloudflare: a public HTTPS address. Every link carries a token; anyone holding a control link can drive the phones.</p>
+      <p class="hint">Tailscale: HTTPS on your tailnet only. Funnel and Cloudflare: a public HTTPS address. Every link carries a token; anyone holding a control link can drive the devices.</p>
     </section>
     <section>
       <h3>New link</h3>
       <div class="row">
-        <label>Phone <select id="linkPhone"><option value="">Every phone</option></select></label>
+        <label>Device <select id="linkPhone"><option value="">Every device</option></select></label>
         <label>Access <select id="linkRole"><option value="view">Watch only</option><option value="control">Watch and drive</option></select></label>
         <label>Expires <select id="linkTtl"><option value="900">15 min</option><option value="3600" selected>1 hour</option><option value="28800">8 hours</option><option value="86400">1 day</option><option value="604800">1 week</option></select></label>
         <button type="button" id="linkMake" class="btn primary">Make link</button>
@@ -47,7 +47,7 @@
 
 <dialog id="pasteDlg">
   <form method="dialog" class="dlg">
-    <h2>Type into the phone</h2>
+    <h2>Type into the device</h2>
     <textarea id="pasteText" rows="5" placeholder="Text to type (US keyboard characters)"></textarea>
     <div class="row end"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="pasteGo" value="ok">Type it</button></div>
   </form>
