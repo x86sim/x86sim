@@ -344,7 +344,8 @@ x86sim debug qa 1234                                    # a process by pid (x86s
 Breakpoints (by name, file and line, address), `step` / `next` / `finish`, `bt all`, `frame variable`, `register
 read`, `memory read`, `image list` / `image lookup` (every image of the dyld cache, read from the process), and stops at
 crashes (`EXC_BAD_ACCESS`, Swift traps as `EXC_BREAKPOINT`) work. Detaching removes the breakpoints and the app runs on. The MCP tools `debug_start`,
-`debug_command` and `debug_stop` keep an lldb session per phone. `tests/lldb/run.sh <phone>` checks it end to end.
+`debug_command` and `debug_stop` keep an lldb session per phone. `tests/lldb/run.sh <phone>` checks it end to end, on
+iPhone, iPad, Apple TV, Apple Watch and Vision Pro (it builds the test app for the phone's platform).
 
 Which lldb: the Swift toolchain's (swift.org's, the one `x86sim dev setup` installs, or a distribution's `swift`
 package) when there is one, so Swift is debugged as in Xcode: `frame variable` shows Swift structs, classes, arrays,
@@ -411,7 +412,8 @@ thread's CPU time with `perf_event_open` (user mode, allowed at the default `per
 sample per millisecond of CPU time: the exact host instruction, mapped back to the guest code block it belongs to, and
 the guest frame-pointer chain. Symbols come from the simulator's dyld cache (which keeps every library's local symbols)
 and the app's binary; C++ and Swift names are demangled. Overhead: none while off; about 1% with one busy thread
-sampled at 1 kHz (`tests/profile/run.sh <phone> [--settings]`, or `--standalone` without a phone, checks it).
+sampled at 1 kHz (`tests/profile/run.sh <phone> [--settings]`, on every platform, or `--standalone` without a phone,
+checks it).
 
 Limits:
 
@@ -553,6 +555,10 @@ x86sim --phone qa ax-action custom "Message from Anna" --name Reply
 ([docs/protocols/SIMAX.md](docs/protocols/SIMAX.md)). Font, color and truncation are read from UIKit labels; for
 SwiftUI text the contrast comes from the pixels alone, and clipping is not seen.
 
+Per platform: Apple TV and Apple Watch get no touch-target check (the focus engine, the watch's own sizes), Vision
+Pro checks 60 pt and no contrast (a window's place in the room is not known), and its frames are each window's own
+points, so the viewer's inspector lists the elements instead of outlining them on the screen.
+
 ### MCP server
 
 `x86sim-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio for AI agents and
@@ -646,6 +652,9 @@ console messages or requests (with status codes).
 
 - Safari's pages are always inspectable. An app's `WKWebView` (or `JSContext`) is listed only when the app sets
   `isInspectable = true`, as in Apple's simulator.
+- iPhone, iPad and Vision Pro have Safari and `WKWebView`. Apple TV has neither (no WebKit in tvOS): an app's
+  inspectable `JSContext` is what there is to inspect (`web_eval`, `web_console`). Apple Watch has no web content to
+  inspect.
 - The phone side is the runtime's `webinspectord`, started on demand at the first inspect (the `webinspector`
   feature, on by default; nothing runs until then). Its socket is `/run/user/<uid>/x86sim-rwi-<UDID>.sock` and speaks
   Apple's Remote Web Inspector protocol (`tools/launcher/core/src/rwi.rs`).
