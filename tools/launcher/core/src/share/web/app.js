@@ -108,6 +108,28 @@ function dashboard() {
   main.append(grid);
   const cards = new Map();
   let n = 0, alive = true;
+  // masonry: a card spans ceil((its height + the gap) / (row 4 px)) grid rows; recomputed when any card changes size
+  // (an image arrives, a Duo folds, the window narrows)
+  let pending = 0;
+  function layoutMasonry() {
+    pending = 0;
+    const cs = getComputedStyle(grid), row = parseFloat(cs.gridAutoRows) || 4, gap = parseFloat(cs.getPropertyValue("--gap")) || 16;
+    for (const c of cards.values()) {
+      const hgt = c.el.getBoundingClientRect().height;
+      if (hgt) c.el.style.gridRowEnd = "span " + Math.ceil((hgt + gap) / row);
+    }
+  }
+  const relayout = () => { if (!pending) pending = requestAnimationFrame(layoutMasonry); };
+  const ro = new ResizeObserver(relayout);
+  // the phone's screen proportions: from the list (screen = the panel shown now), then the image's own size
+  function setAspect(c, w, hh) {
+    if (!(w > 0 && hh > 0)) return;
+    const ar = `${w} / ${hh}`;
+    if (c.ar === ar) return;
+    c.ar = ar;
+    c.thumb.style.setProperty("--ar", ar);
+    c.thumb.classList.add("sized");
+  }
   const control = ME.role === "control";
   async function tick() {
     if (!alive) return;
@@ -129,7 +151,9 @@ function dashboard() {
         c = { el: h("div", { class: "card" }, thumb, title, meta, st, row), img, thumb, title, meta, st, row, loading: false };
         cards.set(p.id, c);
         grid.append(c.el);
+        ro.observe(c.el);
       }
+      if (Array.isArray(p.screen)) setAspect(c, p.screen[0], p.screen[1]);
       c.title.textContent = p.name;
       c.meta.textContent = `${p.model} · ${p.os}`;
       const running = p.state === "running" || p.state === "starting";
@@ -137,7 +161,7 @@ function dashboard() {
       if (running && !c.loading) {
         c.loading = true;
         const im = new Image();
-        im.onload = () => { c.img.src = im.src; if (!c.img.isConnected) c.thumb.replaceChildren(c.img); c.loading = false; };
+        im.onload = () => { setAspect(c, im.naturalWidth, im.naturalHeight); c.img.src = im.src; if (!c.img.isConnected) c.thumb.replaceChildren(c.img); c.loading = false; };
         im.onerror = () => { c.loading = false; };
         im.src = withToken(`/api/phones/${encodeURIComponent(p.id)}/thumb.jpg?w=320&n=${n}`);
       } else if (!running) {
@@ -153,7 +177,8 @@ function dashboard() {
           control ? h("button", { class: "btn small", text: "Share", onclick: () => openShare(p.id) }) : null].filter(Boolean));
       }
     }
-    for (const [id, c] of cards) if (!phones.some((p) => p.id === id)) { c.el.remove(); cards.delete(id); }
+    for (const [id, c] of cards) if (!phones.some((p) => p.id === id)) { ro.unobserve(c.el); c.el.remove(); cards.delete(id); }
+    relayout();
   }
   async function act(e, id, what) {
     e.target.disabled = true;
@@ -163,7 +188,7 @@ function dashboard() {
   }
   tick();
   const iv = setInterval(tick, 2000);
-  return () => { alive = false; clearInterval(iv); };
+  return () => { alive = false; clearInterval(iv); ro.disconnect(); if (pending) cancelAnimationFrame(pending); };
 }
 
 // ---------- HID key codes (physical keys, US layout on the phone) ----------
