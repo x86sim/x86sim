@@ -18,9 +18,9 @@ const WATCH_EDGE: f32 = 22.0;
 fn toolbar_w(platform: &str) -> f32 {
     if platform == "tvos" { 116.0 } else { 46.0 }
 }
-const GESTURES: &str ="Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nF1 Home · F2 Lock · F3/F4 volume";
+const GESTURES: &str ="Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nF1 Home · F2 Lock · F3/F4 volume\nCtrl+K software keyboard · Ctrl+Shift+K hardware keyboard";
 /// Models 2: a two-screen phone's 3D view adds its own controls
-const GESTURES_DUO: &str = "Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nRight-drag (or Alt + drag) turns the phone; scroll with the right button held (or Alt) zooms; double right-click resets the view.\nF1 Home · F2 Lock · F3/F4 volume";
+const GESTURES_DUO: &str = "Click the screen to tap, drag to swipe.\nDrag in from an edge for system gestures (Home, Control Center, back).\nCtrl + drag to pinch, Shift + drag to scroll with two fingers.\nRight-drag (or Alt + drag) turns the device; scroll with the right button held (or Alt) zooms; double right-click resets the view.\nF1 Home · F2 Lock · F3/F4 volume\nCtrl+K software keyboard · Ctrl+Shift+K hardware keyboard";
 const GESTURES_TV: &str = "The keyboard is the remote: arrow keys move, Return selects, Esc goes back.\nClick the screen or the clickpad's centre to select; the wheel over either moves the focus.\nF1 TV (home) · F2 play / pause · F3/F4 volume";
 const GESTURES_WATCH: &str = "Click the screen to tap, drag to swipe.\nThe mouse wheel (over the screen or the crown) or a drag on the crown turns it; a click on the crown presses it.\nF1 presses the crown (watch face / apps) · F2 sleeps / wakes the screen; the side button opens Control Center";
 
@@ -215,7 +215,13 @@ impl App {
                     }
                     Some(rect)
                 } else {
-                    self.viewer(id).map(|v| v.show(ui, avail, live, placeholder, true, viewer::FULL))
+                    // the Accessibility Inspector (axinspect_ui.rs): touches pause while it inspects, its outlines on top
+                    let ax_on = live && crate::axinspect_ui::is_on(&ctx, id);
+                    let r = self.viewer(id).map(|v| v.show(ui, avail, live, placeholder, !ax_on, viewer::FULL));
+                    if let (true, Some(r)) = (live, r) {
+                        crate::axinspect_ui::overlay(ui, &inst, r.shrink(10.0));
+                    }
+                    r
                 };
                 // Platforms 1: a watch's crown and side button stand off its case's right edge, as on the watch
                 if let (true, Some(case)) = (watch, case) {
@@ -250,6 +256,10 @@ impl App {
             }
             ui.close();
         }
+        if menu_row(ui, icon::GLOBE, "Open in browser", "", true, false).on_hover_text("Watch and drive it from a browser tab (x86sim serve)").clicked() {
+            crate::share::open_in_browser(ui.ctx(), Some(inst.id.clone()));
+            ui.close();
+        }
         if menu_row(ui, icon::PENCIL_SIMPLE, "Rename…", "F2", true, false).clicked() {
             self.dialog = Some(crate::Dialog::Rename { id: inst.id.clone(), text: inst.name.clone() });
             ui.close();
@@ -257,7 +267,7 @@ impl App {
         let off = phase == Phase::Off;
         let can = off && !inst.is_default;
         let r = menu_row(ui, icon::TRASH, "Remove device…", "Del", can, true);
-        let r = if inst.is_default { r.on_disabled_hover_text("The main phone stays") } else if !off { r.on_disabled_hover_text("Stop it first") } else { r };
+        let r = if inst.is_default { r.on_disabled_hover_text("The main device stays") } else if !off { r.on_disabled_hover_text("Stop it first") } else { r };
         if r.clicked() {
             self.ask_remove(inst, ui.ctx());
             ui.close();
@@ -457,6 +467,11 @@ impl App {
                         }
                         // a gap, not a rule, between the device's buttons and the launcher's own tools
                         ui.add_space(S3);
+                    }
+                    // Share: this phone in a browser tab (share.rs)
+                    if let Some(inst) = self.inst(id).cloned() {
+                        self.share_tool(ui, &inst);
+                        crate::axinspect_ui::tool(ui, &inst, live);
                     }
                     if tool(ui, icon::CAMERA, "Save a screenshot to Pictures") {
                         let r = self.viewer(id).map(|v| v.screenshot(&name));
@@ -727,10 +742,32 @@ impl App {
         }
         hline(ui);
 
+        // ---- Share: the phone in a browser, here or elsewhere (share.rs)
+        let sharing = if self.open.contains("share") { String::new() } else { crate::share::summary() };
+        if self.fold_section(ui, "share", "Share", &sharing, "") {
+            self.share_section(ui, inst);
+        }
+        hline(ui);
+
+        // ---- Accessibility: the inspector's properties and actions, the audit (axinspect_ui.rs)
+        if self.fold_section(ui, "ax", "Accessibility", "", "") {
+            crate::axinspect_ui::section(ui, inst, phase != Phase::Off);
+        } else if crate::axinspect_ui::is_on(ui.ctx(), &id) {
+            // picking an element opens it
+            self.open.insert("ax");
+        }
+        hline(ui);
+
         // ---- Performance
         // no summary: memory and CPU are the tiles at the top
         if self.fold_section(ui, "perf", "Performance", "", "") {
             self.perf_section(ui, &id, st);
+        }
+        hline(ui);
+
+        // ---- Simulate: appearance, text size, contrast, fidelity, erase / clone (devctl_ui.rs)
+        if self.fold_section(ui, "sim", "Simulate", "", "") {
+            self.simulate_section(ui, inst, phase);
         }
         hline(ui);
 
@@ -742,7 +779,7 @@ impl App {
 
     fn fold_section(&mut self, ui: &mut egui::Ui, key: &'static str, title_text: &str, summary: &str, tip: &str) -> bool {
         let open = self.open.contains(key);
-        let hint = match key { "features" => "f", "logs" => "l", "perf" => "p", _ => "a" };
+        let hint = match key { "features" => "f", "logs" => "l", "perf" => "p", "share" | "ax" => "", _ => "a" };
         if fold(ui, title_text, summary, tip, hint, open) != open {
             if open {
                 self.open.remove(key);
@@ -1032,7 +1069,7 @@ impl App {
             s.jobs = opts[i].0.into();
             save = true;
         }
-        field(ui, "Memory cap", "X86SIM_MEM_MAX for this phone's processes (systemd MemoryMax), e.g. 6G. Empty: no cap.");
+        field(ui, "Memory cap", "X86SIM_MEM_MAX for this device's processes (systemd MemoryMax), e.g. 6G. Empty: no cap.");
         if ui.add(egui::TextEdit::singleline(&mut s.mem_max).hint_text(egui::RichText::new("No cap").color(pal().ink_3)).desired_width(120.0).margin(egui::Margin::symmetric(8, 6))).lost_focus() {
             save = true;
         }

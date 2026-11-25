@@ -53,7 +53,17 @@
      "desc": "Home screen widgets. Off by default, they use a lot of memory.",
      "tech": "chronod, WidgetRenderer and the widget extensions (home screen widgets). Not on by default: about 750 MB more.",
      "add_jobs": ["com.apple.chronod"], "unpark": ["WidgetRenderer"], "keep_widgets": true,
-     "chunks": ["chronod", "WidgetRenderer", "Widget"], "cost_mb": 750, "when": "boot"}
+     "chunks": ["chronod", "WidgetRenderer", "Widget"], "cost_mb": 750, "when": "boot"},
+    {"id": "xctest", "title": "UI testing", "default": true,
+     "desc": "Run XCUITest UI tests (x86sim test). Nothing runs until a UI test starts; unit tests work without it.",
+     "tech": "testmanagerd (the runtime's XCTest daemon) and automationmode-writer, started on demand by launchd as in Apple's simulator: XCUIApplication launches, element queries and synthesized events of UI test runners. Not started by a boot (measured: 0 MB idle); about 440 MB while UI tests run and until it is reclaimed. Off: UI test bundles cannot run; unit and logic tests still do.",
+     "add_jobs": ["com.apple.testmanagerd", "com.apple.dt.automationmode-writer", "com.apple.dt.AutomationModeUI"],
+     "chunks": ["/testmanagerd", "automationmode-writer", "AutomationModeUI"], "cost_mb": 440, "when": "use"},
+    {"id": "webinspector", "title": "Web Inspector", "default": true,
+     "desc": "Inspect Safari pages and apps' web views (x86sim inspect, the viewer's Inspect button). Nothing runs until you inspect.",
+     "tech": "webinspectord (the runtime's Remote Web Inspector relay), on demand: the launcher wakes it at the first inspect (an XPC message through host/openurl) and libsimshim binds its debugger socket at /run/user/<uid>/x86sim-rwi-<UDID>.sock; it exits when the last inspector leaves. Measured: no process while nobody inspects; 40 MB RSS / 21 MB PSS while inspecting. Off: no Web Inspector, no web_* MCP tools.",
+     "add_jobs": ["com.apple.webinspectord"],
+     "chunks": ["/webinspectord"], "cost_mb": 21, "when": "use"}
   ],
   "presets": {
     "full": {},

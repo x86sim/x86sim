@@ -135,6 +135,11 @@ impl Aot {
 
     /// Check every version again soon (a device stopped, the versions changed).
     pub fn want_auto(&mut self, after: Duration) {
+        // X86SIM_NO_AUTO_AOT=1: no pre-translate pass on its own (a launcher started for screenshots or tests would
+        // otherwise update a shared cache in the background, and get killed half-way when the test ends)
+        if std::env::var_os("X86SIM_NO_AUTO_AOT").is_some_and(|v| v == "1") {
+            return;
+        }
         self.auto_at = Some(Instant::now() + after);
     }
 
@@ -324,6 +329,8 @@ impl App {
         let mut cancel: Option<host::Fetch> = None;
         let mut discard: Option<host::Runtime> = None;
         let mut aot_rt = None;
+        let mut rt_open: Option<host::Runtime> = None;
+        let mut rt_stop: Vec<String> = vec![];
         list_card(ui, |ui| {
             if runtimes.is_empty() {
                 empty_state(ui, icon::STACK, "No version yet", "Download one below to start a device.", |_| {});
@@ -345,6 +352,12 @@ impl App {
                 let warn = if fetching.is_some() || r.present { None } else if partial.is_some() { Some("Stopped") } else { Some("Files missing") };
                 list_row(ui, icon::STACK, &r.label(), &line, |ui| {
                     if r.present {
+                        // the row's trailing side is laid out right to left: Delete ends up rightmost
+                        if self.rt_delete.busy(&r.build) {
+                            busy(ui, "Deleting…");
+                        } else if ui.add(Btn::ghost("Delete").icon(icon::TRASH)).on_hover_text("Delete this version (asks first)").clicked() {
+                            rt_open = Some(r.clone());
+                        }
                         if ui.add(Btn::secondary("Pre-translate").icon(icon::LIGHTNING)).on_hover_text("Get this version's apps ready ahead of time").clicked() {
                             aot_rt = Some(r.root.clone());
                         }
@@ -362,6 +375,12 @@ impl App {
                         badge(ui, w, pal().warn);
                     }
                 });
+                if r.present {
+                    match self.rt_delete.panel(ui, r) {
+                        crate::rtdelete_ui::Action::Stop(ids) => rt_stop.extend(ids),
+                        _ => {}
+                    }
+                }
                 if let Some(f) = &fetching {
                     if fetch_progress(ui, f) {
                         cancel = Some(f.clone());
@@ -487,6 +506,17 @@ impl App {
                 Err(e) => self.say(format!("Couldn't discard it: {e:#}")),
             }
             self.runtimes = host::runtimes();
+        }
+        if let Some(r) = rt_open {
+            self.rt_delete.open(&r, ui.ctx());
+        }
+        for id in rt_stop {
+            self.stop(&id);
+        }
+        if let crate::rtdelete_ui::Action::Finished(m) = self.rt_delete.poll() {
+            self.say(m);
+            self.runtimes = host::runtimes();
+            self.aot.want_auto(Duration::from_secs(5));
         }
         if let Some(rt) = aot_rt {
             self.aot.select(rt, None);

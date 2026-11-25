@@ -43,11 +43,12 @@ PREFIX = x86config.get("X86SIM_PREFIX")
 MTLVK_SOCKET = os.environ.get("X86SIM_MTLVK_SOCKET") or os.path.join(x86config.get("X86SIM_STATE"), "mtlvk.sock")
 # x86Sim: the host side of the simulator's audio (cli/libexec/simaudio.py, started by cli/libexec/arm64/boot-a64.sh)
 AUDIO_SOCKET = os.environ.get("X86SIM_AUDIO_SOCKET") or os.path.join(x86config.get("X86SIM_STATE"), "simaudio.sock")
-# X86SIM_AUDIO=1: the devices' PCM goes to the host (PipeWire) through simaudio.py. Without it the devices are still there,
-# silent (no socket: the output's IO thread runs on its clock and drops the PCM, the input reads silence), as a Mac's
-# simulator always has an output device: with none, AVPlayer refused every item with an audio track (HLS from Apple's
-# samples or YouTube: CoreMediaErrorDomain -12746 at once; video-only playlists played)
-AUDIO = os.environ.get("X86SIM_AUDIO", "0") != "0"
+# The devices' PCM goes to simaudio.py, which boot-a64.sh always starts: PipeWire with X86SIM_AUDIO=1, a browser
+# through x86sim serve's tap either way. X86SIM_AUDIO_SOCKET=none: no socket (the devices are still there, silent: the
+# output's IO thread runs on its clock and drops the PCM, the input reads silence), as a Mac's simulator always has an
+# output device: with none, AVPlayer refused every item with an audio track (HLS from Apple's samples or YouTube:
+# CoreMediaErrorDomain -12746 at once; video-only playlists played)
+AUDIO = AUDIO_SOCKET != "none"
 DARLING_VIEW = "/Volumes/SystemRoot"  # Linux / as seen inside Darling
 # x86Sim: a device for the arm64 runtime (iOS 27, run under libarm64jit): arm64 device types, arm64 builds of our
 # in-simulator binaries (host/<name>/arm64/...; jobs and shims without one are left out), no libkqueue_sim (the arm64
@@ -83,6 +84,17 @@ def device_type(device):
         dt["name"] = open(os.path.join(device, "name")).read().strip() or "x86sim"
     except OSError:
         pass
+    # x86Sim: <device>/fidelity "fast" (x86sim fidelity, devctl.py): a 3x model's screen at 2x, the same points in 4/9
+    # of the pixels (as Apple's "at 1080p" device types do for Apple TV / Vision Pro): less to draw, composite and copy
+    # per frame. 2x and 1x models keep theirs. "high" (or no file): the model's own screen.
+    try:
+        fid = open(os.path.join(device, "fidelity")).read().strip()
+    except OSError:
+        fid = ""
+    if fid == "fast" and float(dt["scale"]) == 3.0:
+        dt["w"], dt["h"] = str(int(dt["w"]) * 2 // 3), str(int(dt["h"]) * 2 // 3)
+        dt["scale"] = "2.000000"
+        dt["pitch"] = "%f" % (float(dt["pitch"]) * 2 / 3)
     return dt
 
 
@@ -108,6 +120,12 @@ def host_path(rel):
     a, b, rest = rel.split("/", 2)
     p = "/".join([PROJECT, a, b, "arm64" if PLATFORM == "ios" else "arm64-" + PLATFORM, rest])
     return p if os.path.exists(p) else None
+
+
+def rwi_socket(udid, darling_side=False):
+    """x86Sim (Web Inspector): webinspectord's debugger socket for this device (host path, or as the guest sees it)."""
+    p = "/run/user/%d/x86sim-rwi-%s.sock" % (os.getuid(), udid)
+    return "/Volumes/SystemRoot" + p if darling_side else p
 
 
 def darling(path):
@@ -201,6 +219,11 @@ def main():
     for d in ["tmp", "var/run", "var/db", "var/log", "Library/Preferences", "Library/Logs",
               "Library/Application Support/Simulator", "Library/LaunchDaemons"]:
         os.makedirs(os.path.join(data, d), exist_ok=True)
+    # x86Sim: Automation Mode's state folder, which CoreSimulator makes in every device's data (empty until a UI test
+    # enables it). automationmode-writer only writes its state file into it ("The folder automation-enabled doesn't
+    # exist" otherwise), so Automation Mode stayed off: watchOS apps then refused XCTest's automation session and UI
+    # tests failed with "Lost connection to the application" (tests/apps/XCTestDemo on a watch).
+    os.makedirs(os.path.join(data, "var/db/com.apple.dt.automationmode"), exist_ok=True)
     open(data + "/var/run/memory_warning_simulation", "a").close()
     # x86Sim: the runtime's sample content (SampleContent next to RuntimeRoot: on iOS the photo library with its six
     # sample photos, and the sample contacts), which CoreSimulator copies into a new device's data at `simctl create`.
@@ -315,6 +338,10 @@ def main():
             continue
         src, dst = os.path.join(RUNTIME, "System/Library/LaunchDaemons", job + ".plist"), daemons
         if not os.path.exists(src):
+            # x86Sim: the runtime's developer jobs (testmanagerd for XCTest / XCUITest, the xctest feature), which
+            # CoreSimulator loads from <runtime>/Developer/Library/LaunchDaemons on a Mac
+            src = os.path.join(RUNTIME, "Developer/Library/LaunchDaemons", job + ".plist")
+        if not os.path.exists(src):
             src, dst = os.path.join(RUNTIME, "System/Library/LaunchAngels", job + ".plist"), angels
         with open(src, "rb") as f:
             plist = plistlib.load(f)
@@ -371,6 +398,17 @@ def main():
         # reclaimed (~100 MB). On a device dasd expires an activity nobody checks in.
         for act in STALE_ACTIVITIES.get(job, ()):
             plist.get("LaunchEvents", {}).get("com.apple.xpc.activity", {}).pop(act, None)
+        # x86Sim (Web Inspector): webinspectord's debugger socket (Safari's Develop menu on a Mac). launchd_sim binds a
+        # SecureSocketWithKey socket in a mkdtemp directory of the device's /private/var/tmp, ~130 bytes on the host, which
+        # Darling truncates to 103 (duct.c: com.apple.launchd.XXXXXXXXXX/com.apple.t, the same name for every such
+        # socket of a job), and it refuses SockPathName ("not supported on this platform"). So no Sockets entry: libsimshim
+        # answers webinspectord's launch_activate_socket with a socket it binds at X86SIM_RWI_SOCKET, a short host path in
+        # /run/user (the simax convention), where the launcher's RWI client (tools/launcher/core/src/rwi.rs) connects with
+        # no Darling code in the way. The job stays on demand (MachServices): the launcher wakes it with an XPC message
+        # through host/openurl (xpcping) when it finds nobody listening.
+        if job == "com.apple.webinspectord":
+            plist.pop("Sockets", None)
+            plist.setdefault("EnvironmentVariables", {})["X86SIM_RWI_SOCKET"] = rwi_socket(udid, darling_side=True)
         # x86Sim: X86SIM_JOBENV="label:K=V;label:K=V": extra environment for runtime jobs (experiments)
         for kv in filter(None, os.environ.get("X86SIM_JOBENV", "").split(";")):
             lab, _, ev = kv.partition(":")
@@ -518,11 +556,13 @@ def main():
     child_defaults = {
         # X86SIM_INSERT: extra ':'-separated dylibs (host paths) for diagnostics
         # simshim: stand-ins for host services (host/simshim/compat/simshim.c)
-        # simaudio: the audio devices (host/simaudio; heard on the host with X86SIM_AUDIO=1, silent otherwise)
+        # simaudio: the audio devices (host/simaudio; heard on the host with X86SIM_AUDIO=1, in x86sim serve's page)
         "DYLD_INSERT_LIBRARIES": ":".join(
                                           [darling(p) for p in [host_path("host/simshim/compat/libsimshim.dylib")] if p] +
                                           [darling(p) for p in [host_path("host/simaudio/libsimaudio.dylib")] if p] + [darling(os.path.abspath(p))
                                           for p in os.environ.get("X86SIM_INSERT", "").split(":") if p]),
+        # simax: the accessibility reader for agents (host/simax), dlopened by libsimshim in processes with UIKit
+        **({"X86SIM_AX_DYLIB": darling(host_path("host/simax/libsimax.dylib"))} if host_path("host/simax/libsimax.dylib") else {}),
         "CFFIXED_USER_HOME": home,
         "HOME": home,
         "TMPDIR": home + "/tmp/",
@@ -637,6 +677,25 @@ def main():
     with open(device + "/sim.env", "w") as f:
         for k, v in env.items():
             f.write("%s=%s\n" % (k, v))
+    # the last boot's device orientation (host/simhid writes it at a rotation): the device boots upright, and a stale
+    # landscape here turned screenshots and touches sideways (an iPad rebooted after landscapeRight)
+    try:
+        os.unlink(os.path.join(data, "orientation"))
+    except OSError:
+        pass
+    # the last boot's Web Inspector socket (launchd_sim binds it again; a stale file makes the bind fail)
+    try:
+        os.unlink(rwi_socket(udid))
+    except OSError:
+        pass
+    # the last boot's accessibility-reader sockets (host/simax): their processes are gone
+    import glob
+    ring_dir = os.path.dirname(env["SIMFB_RING"].removeprefix(DARLING_VIEW))
+    for p in glob.glob(os.path.join(ring_dir, "x86sim-ax-%s-*" % udid)):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
     print(device, udid)
 
 

@@ -614,14 +614,14 @@ impl State {
             }
             TEX_NEW => {
                 let id = r.u64();
-                let (status, size) = match self.tex_new(id, &mut r) {
-                    Ok(s) => (0, s),
+                let (status, rid) = match self.tex_new(id, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_NEW {id:#x}: {e}");
                         (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(size);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             TEX_REPLACE => {
@@ -811,26 +811,26 @@ impl State {
             }
             TEX_NEW_BUF => {
                 let (id, buf) = (r.u64(), r.u64());
-                let (status, size) = match self.tex_new_buf(id, buf, &mut r) {
-                    Ok(s) => (0, s),
+                let (status, rid) = match self.tex_new_buf(id, buf, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_NEW_BUF {id:#x}: {e}");
                         (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(size);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             TEX_VIEW => {
                 let (id, parent) = (r.u64(), r.u64());
-                let status = match self.tex_view(id, parent, &mut r) {
-                    Ok(()) => 0,
+                let (status, rid) = match self.tex_view(id, parent, &mut r) {
+                    Ok(rid) => (0, rid),
                     Err(e) => {
                         eprintln!("mtlvk: TEX_VIEW {id:#x} of {parent:#x}: {e}");
-                        -1
+                        (-1, 0)
                     }
                 };
-                w.i32(status).u32(0).u64(0);
+                w.i32(status).u32(0).u64(rid);
                 Some(w.0)
             }
             _ => {
@@ -1021,8 +1021,9 @@ impl State {
         }
         let k = if desc.storage_mode == StorageMode::Private { Kind::TexPrivate } else { Kind::TexShared };
         self.kinds.insert(id, (k, tex_bytes(&desc)));
+        let rid = t.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(t));
-        Ok(0)
+        Ok(rid)
     }
 
     /// A texture over a buffer's bytes: an IOSurface plane (the surface's memfd pages, imported as the buffer) or
@@ -1075,21 +1076,23 @@ impl State {
                         eprintln!("mtlvk: texture {id:#x}: drawn in VRAM, copied to the surface after each command buffer");
                     }
                     self.proxies.insert(id, Proxy { buf: b, offset, bpr });
+                    let rid = v.gpu_resource_id().to_bits();
                     self.objs.insert(id, Obj::Tex(v));
                     self.kinds.insert(id, (Kind::TexProxy, 0));
-                    return Ok(0);
+                    return Ok(rid);
                 }
                 Err(e) => eprintln!("mtlvk: texture {id:#x}: no VRAM proxy ({e}); drawing into the surface"),
             }
         }
         let t = self.indexed(id, desc.pixel_format, desc.usage, |_, i| b.new_texture(&desc, i, offset, bpr).map_err(err("buffer new_texture")))?;
+        let rid = t.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(t));
         self.kinds.insert(id, (Kind::TexOverBuf, 0));
-        Ok(0)
+        Ok(rid)
     }
 
     /// x86Sim: newTextureViewWithPixelFormat:[textureType:levels:slices:[swizzle:]]
-    fn tex_view(&mut self, id: u64, parent: u64, r: &mut Rd) -> Res<()> {
+    fn tex_view(&mut self, id: u64, parent: u64, r: &mut Rd) -> Res<u64> {
         let (pf, ttype) = (r.u32(), r.u32());
         let (l0, ln, s0, sn) = (r.u64(), r.u64(), r.u64(), r.u64());
         let (has_swizzle, sw) = (r.u32(), r.u32());
@@ -1118,9 +1121,10 @@ impl State {
         if self.log {
             eprintln!("mtlvk: texture view {id:#x} of {parent:#x}: {pf:?} {tt:?} levels {l0}+{ln} slices {s0}+{sn}");
         }
+        let rid = v.gpu_resource_id().to_bits();
         self.objs.insert(id, Obj::Tex(v));
         self.kinds.insert(id, (Kind::TexView, 0));
-        Ok(())
+        Ok(rid)
     }
 
     fn texdesc(r: &mut Rd) -> Res<TextureDescriptor> {
@@ -1932,7 +1936,7 @@ impl State {
         LAST_PASS_IDS.with(|v| v.borrow_mut().clear());
         let mut pass = RenderPassDescriptor::default();
         let mut resolves: Vec<(Option<Texture>, u32, u32)> = Vec::new();
-        let mut att = |c: &mut Rd| -> Res<(Option<Texture>, u32, u32, u32, u32, [f64; 4])> {
+        let mut att = |c: &mut Rd| -> Res<(Option<Texture>, u32, u32, u32, u32, u32, [f64; 4])> {
             let t = c.u64();
             let (level, slice, plane, load, store, _pad) = (c.u32(), c.u32(), c.u32(), c.u32(), c.u32(), c.u32());
             let clear = [c.f64(), c.f64(), c.f64(), c.f64()];
@@ -1947,9 +1951,7 @@ impl State {
             self.mark(rt);
             let tex = if t == 0 { None } else { Some(self.tex(t)?.clone()) };
             resolves.push((if rt == 0 { None } else { Some(self.tex(rt)?.clone()) }, rl, rs));
-            // a 3D texture's depth plane: the runtime renders no 3D texture, and takes the slice for an array's layer
-            let slice = if plane != 0 && slice == 0 { plane } else { slice };
-            Ok((tex, level, slice, load, store, clear))
+            Ok((tex, level, slice, plane, load, store, clear))
         };
         let mut colors = Vec::new();
         for _ in 0..MAX_COLOR {
@@ -1957,7 +1959,7 @@ impl State {
         }
         let depth = att(c)?;
         let stencil = att(c)?;
-        for (i, (tex, level, slice, load, store, clear)) in colors.into_iter().enumerate() {
+        for (i, (tex, level, slice, plane, load, store, clear)) in colors.into_iter().enumerate() {
             if tex.is_none() || i >= pass.color_attachments.len() {
                 continue;
             }
@@ -1965,12 +1967,14 @@ impl State {
             a.texture = tex;
             a.level = level;
             a.slice = slice;
+            // a 3D texture's depth plane, rendered through a 2D view of that plane (read of no other type)
+            a.depth_plane = plane;
             a.load_action = load_action(load)?;
             a.store_action = store_action(store)?;
             a.clear_color = ClearColor::new(clear[0], clear[1], clear[2], clear[3]);
             (a.resolve_texture, a.resolve_level, a.resolve_slice) = resolves[i].clone();
         }
-        let (tex, level, slice, load, store, clear) = depth;
+        let (tex, level, slice, _plane, load, store, clear) = depth;
         if tex.is_some() {
             let a = &mut pass.depth_attachment;
             a.texture = tex;
@@ -1981,7 +1985,7 @@ impl State {
             a.clear_depth = clear[0];
             (a.resolve_texture, a.resolve_level, a.resolve_slice) = resolves[MAX_COLOR].clone();
         }
-        let (tex, level, slice, load, store, clear) = stencil;
+        let (tex, level, slice, _plane, load, store, clear) = stencil;
         if tex.is_some() {
             let a = &mut pass.stencil_attachment;
             a.texture = tex;

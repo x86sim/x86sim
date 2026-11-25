@@ -12,6 +12,7 @@
 //!   x86sim-aot features list|get ID|set ID on|off|preset full|lean|minimal [--device DIR]
 //!   x86sim-aot sim status|start|stop|restart|show [--device DIR|NAME]   status: every phone
 //!   x86sim-aot setup check|install-darling|link-runtime DIR|done [--json]   the launcher's setup steps (docs/RELEASE.md)
+//!   x86sim-aot runtime delete BUILD [--all] [--stop] [--yes] [--dry-run] [--json]   delete an installed OS version
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -270,7 +271,7 @@ fn run() -> Result<()> {
             let sub = if args.is_empty() { "status".to_string() } else { args.remove(0) };
             // `sim stop var/device-a64-ram3` used to ignore the path and stop the --device default (the main phone)
             if matches!(sub.as_str(), "start" | "stop" | "restart") && !args.is_empty() {
-                bail!("sim {sub}: unexpected argument {:?} (the phone is --device DIR)", args[0]);
+                bail!("sim {sub}: unexpected argument {:?} (the device is --device DIR)", args[0]);
             }
             match sub.as_str() {
                 "status" => {
@@ -294,7 +295,51 @@ fn run() -> Result<()> {
                 _ => bail!("sim status|start|stop|restart|show"),
             }
         }
-        _ => bail!("unknown command {cmd} (status, update, build, measure, config, features, sim)"),
+        // an installed OS version: what deleting it frees, then the delete (x86sim runtime delete; core rtdelete.rs)
+        "runtime" => {
+            use x86sim_core::rtdelete;
+            let sub = if args.is_empty() { String::new() } else { args.remove(0) };
+            anyhow::ensure!(sub == "delete", "runtime delete BUILD [--all] [--stop] [--yes] [--dry-run] [--json]");
+            let all = has(&mut args, "--all");
+            let stop = has(&mut args, "--stop");
+            let yes = has(&mut args, "--yes") | has(&mut args, "-y");
+            let dry = has(&mut args, "--dry-run");
+            let key = args.first().cloned().ok_or_else(|| anyhow::anyhow!("runtime delete: which version (a build, e.g. 24K150)"))?;
+            let r = rtdelete::find(&key)?;
+            let mut plan = rtdelete::plan(&r);
+            if json && (dry || !yes) {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(());
+            }
+            eprint!("{}", rtdelete::describe(&plan));
+            if dry {
+                return Ok(());
+            }
+            let freeing = plan.runtime_bytes + if all { plan.caches_bytes } else { 0 };
+            if !yes {
+                use std::io::IsTerminal;
+                anyhow::ensure!(std::io::stdin().is_terminal(), "not deleted: add --yes (no terminal to ask on)");
+                eprint!("Delete {} ({}, {})? [y/N] ", plan.label, if all { "everything" } else { "the version only" }, rtdelete::gb(freeing));
+                let mut l = String::new();
+                std::io::stdin().read_line(&mut l)?;
+                if !l.trim().eq_ignore_ascii_case("y") && !l.trim().eq_ignore_ascii_case("yes") {
+                    bail!("not deleted");
+                }
+            }
+            // the answer may have taken a while: a phone started meanwhile must block the delete (as the GUI re-plans)
+            plan = rtdelete::plan(&r);
+            if stop && !plan.running_devices().is_empty() {
+                rtdelete::stop_devices(&plan, 120)?;
+                plan = rtdelete::plan(&r);
+            }
+            let freed = rtdelete::delete(&plan, all)?;
+            if json {
+                println!("{}", serde_json::json!({"deleted": plan.dir, "all": all, "freed_bytes": freed}));
+            } else {
+                println!("deleted {} ({}): {} freed", plan.label, if all { "everything" } else { "the version only" }, rtdelete::gb(freed));
+            }
+        }
+        _ => bail!("unknown command {cmd} (status, update, build, measure, config, features, sim, runtime)"),
     }
     Ok(())
 }

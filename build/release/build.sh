@@ -15,6 +15,14 @@ PREFIX=/opt/x86sim/darling
 DB=$OUT/dbuild
 DEST=$OUT/destdir
 L=$DEST$PREFIX/libexec/darling/usr/libexec/darling
+# Reproducible Darling: Darling's ld64 writes each object file's mtime into the N_OSO debug stabs of every Mach-O it
+# links unless ZERO_AR_DATE is set, so each build of the same source gave a different DARLING_ID (appimage.sh) and every
+# release made system-mode users reinstall Darling (a password prompt) though Darling had not changed
+export ZERO_AR_DATE=1
+# and __DATE__ / __TIME__ (CoreFoundation's version string, nano, vim, perl, Python): clang takes them from
+# SOURCE_DATE_EPOCH, here Darling's commit time
+[ -n "${SOURCE_DATE_EPOCH:-}" ] || SOURCE_DATE_EPOCH=$(git -C "$X/external/darling" log -1 --format=%ct 2>/dev/null) || true
+[ -z "${SOURCE_DATE_EPOCH:-}" ] || export SOURCE_DATE_EPOCH
 t0=$(date +%s)
 step() { echo "== $1 ($(( $(date +%s) - t0 )) s)"; }
 for s in $STEPS; do case $s in
@@ -39,7 +47,8 @@ arm64jit)
 	step "arm64jit"
 	B=$OUT/build-arm64jit
 	[ -f "$B/build.ninja" ] || cmake -S "$X/linux/arm64jit" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ > "$OUT/arm64jit-cmake.log" 2>&1
+		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+		${CCACHE:+-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache} > "$OUT/arm64jit-cmake.log" 2>&1
 	ninja -C "$B" -j"$JOBS" arm64jit a64hugecopy > "$OUT/arm64jit.log" 2>&1 || { grep -E 'FAILED|error:' "$OUT/arm64jit.log" | head; exit 1; }
 	mkdir -p "$L" && cp "$B/libarm64jit.so" "$B/a64hugecopy" "$L/"
 	;;

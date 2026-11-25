@@ -594,6 +594,9 @@ impl Viewer {
                             egui::Key::F3 => buttons.push(("volup", *pressed)),
                             egui::Key::F4 => buttons.push(("voldown", *pressed)),
                             egui::Key::H if modifiers.ctrl => buttons.push(("home", *pressed)),
+                            // Apple's Cmd-K / Shift-Cmd-K: Toggle Software Keyboard / Connect Hardware Keyboard
+                            egui::Key::K if modifiers.ctrl && *pressed => buttons.push((if modifiers.shift { "hwkb" } else { "softkb" }, true)),
+                            egui::Key::K if modifiers.ctrl => {}
                             k => {
                                 if let Some((u, sh)) = usage(k) {
                                     sends.push((*pressed, u, sh, modifiers.ctrl || modifiers.mac_cmd, modifiers.shift));
@@ -622,7 +625,14 @@ impl Viewer {
                 });
             });
             for (b, down) in buttons {
-                self.hid.button(b, down);
+                match b {
+                    "softkb" => self.hid.soft_keyboard_toggle(),
+                    "hwkb" => {
+                        let on = !self.hid.hw_keyboard_connected();
+                        self.hid.hw_keyboard(on);
+                    }
+                    _ => self.hid.button(b, down),
+                }
             }
             // Shift mirrors the host's Shift key: set from each key press, then from the frame's final state (a key's
             // release can come without the modifier: sending Shift with each key left it held on the phone)

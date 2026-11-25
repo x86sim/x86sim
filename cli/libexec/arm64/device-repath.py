@@ -5,7 +5,7 @@
                                              (refuses a booted DEVICE; --force: anyway)
 
 The simulator sees a device's data as /Volumes/SystemRoot<repo>/var/<device>/data and many stores keep that path
-absolute. A copy of var/device-a64's data/ kept the base phone's: lsd's csstore held every app's data container as
+absolute. A copy of var/device-a64's data/ kept the base device's: lsd's csstore held every app's data container as
 .../var/device-a64/data/Containers/..., so apps on a clone ran with HOME in the base phone's containers (Safari on
 ram2 wrote the main phone's databases). containermanagerd and MobileInstallation keep no absolute paths (they
 resolve containers under HOME at runtime), so the rest are caches and preferences:
@@ -103,7 +103,7 @@ def has(path, ob):
 
 
 def booted(dev):
-    """a process of the phone runs: its launchd_sim's command line names <dev>/data/ (as boot-a64.sh's stop_prefix)"""
+    """a process of the device runs: its launchd_sim's command line names <dev>/data/ (as boot-a64.sh's stop_prefix)"""
     key = (os.path.realpath(dev) + "/data/").encode()
     for p in os.listdir("/proc"):
         if p.isdigit():

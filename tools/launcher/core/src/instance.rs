@@ -125,15 +125,15 @@ pub fn ring_for(id: &str) -> PathBuf {
     PathBuf::from(format!("/run/user/{}/x86sim-{tag}-simfb.ring", uid()))
 }
 
-/// A name for a phone made without one: "" -> "Main phone", "-probe" -> "Probe", "b" -> "Phone B"
+/// A name for a phone made without one: "" -> "Main device", "-probe" -> "Probe", "b" -> "Device B"
 fn default_name(sfx: &str) -> String {
     let t = sfx.trim_start_matches('-').replace(['-', '_'], " ");
     let t = t.trim();
     if t.is_empty() {
-        return "Main phone".into();
+        return "Main device".into();
     }
     if t.len() <= 2 {
-        return format!("Phone {}", t.to_uppercase());
+        return format!("Device {}", t.to_uppercase());
     }
     let mut c = t.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
@@ -864,9 +864,9 @@ pub fn delete_plan(inst: &Instance) -> Vec<PathBuf> {
 /// Removes a phone that is off. The default phone (its dirs are the scripts' defaults) is never removed, nor a dir a
 /// running container uses.
 pub fn delete(inst: &Instance, st: Option<&Status>) -> Result<()> {
-    anyhow::ensure!(!inst.is_default, "the main phone can't be removed");
+    anyhow::ensure!(!inst.is_default, "the main device can't be removed");
     anyhow::ensure!(st.is_none_or(|s| s.phase == Phase::Off && s.launchd_pid.is_none()), "stop {} first", inst.name);
-    anyhow::ensure!(inst.dir.starts_with(repo_root().join("var")) && inst.id.starts_with("device-a64") && inst.id != "device-a64", "not a phone dir: {}", inst.dir.display());
+    anyhow::ensure!(inst.dir.starts_with(repo_root().join("var")) && inst.id.starts_with("device-a64") && inst.id != "device-a64", "not a device dir: {}", inst.dir.display());
     let plan = delete_plan(inst);
     for p in &plan {
         anyhow::ensure!(!(p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("a64prefix")) && darlingserver_uses(p)), "{} is in use", p.display());

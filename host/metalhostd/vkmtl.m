@@ -446,6 +446,9 @@ static size_t vk_region_bytes(MTLPixelFormat f, MTLRegion r, NSUInteger bpr, NSU
 	// x86Sim: texture views: the parent (retained) and where the view starts in it
 	id _parent;
 	NSUInteger _parentLevel, _parentSlice;
+	// gpuResourceID: mtlvk's (the runtime's set-1 index and its format word), what a shader reads of a texture
+	// written into an argument buffer; the object id is not one
+	uint64_t _rid;
 }
 @end
 
@@ -482,6 +485,7 @@ static uint32_t vk_swizzle_bits(MTLTextureSwizzleChannels s) {
 		[self release];
 		return nil;
 	}
+	if (rs >= 16) memcpy(&_rid, (char*)r + 8, 8);
 	free(r);
 	VKTRACE("texture %llu: format %lu %lux%lux%lu mips %lu usage %#lx options %#lx", _vkid, (unsigned long)_format,
 		(unsigned long)_width, (unsigned long)_height, (unsigned long)_depth, (unsigned long)_mips, (unsigned long)_usage, (unsigned long)_options);
@@ -558,6 +562,7 @@ static uint32_t vk_swizzle_bits(MTLTextureSwizzleChannels s) {
 		[v release];
 		return nil;
 	}
+	if (rs >= 16) memcpy(&v->_rid, (char*)r + 8, 8);
 	free(r);
 	VKTRACE("texture %llu: view of %llu format %lu", v->_vkid, _vkid, (unsigned long)pf);
 	return (id<MTLTexture>)v;
@@ -605,6 +610,7 @@ static uint32_t vk_swizzle_bits(MTLTextureSwizzleChannels s) {
 		[self release];
 		return nil;
 	}
+	if (rs >= 16) memcpy(&_rid, (char*)r + 8, 8);
 	free(r);
 	VKTRACE("texture %llu: format %lu %lux%lu over buffer %llu +%lu row %lu%s", _vkid, (unsigned long)_format, (unsigned long)_width,
 		(unsigned long)_height, ((VKMTLObject*)buffer)->_vkid, (unsigned long)offset, (unsigned long)bpr, surface ? " (IOSurface)" : "");
@@ -615,7 +621,7 @@ static uint32_t vk_swizzle_bits(MTLTextureSwizzleChannels s) {
 - (MTLTextureCompressionType)compressionType { return MTLTextureCompressionTypeLossless; }
 // x86Sim: iOS 27 MTLSimTexture compressionMetadata (lossy/compressed layouts); none of ours are compressed.
 - (id)compressionMetadata { return nil; }
-- (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _vkid; return r; }
+- (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _rid; return r; }
 - (NSUInteger)allocatedSize {
 	NSUInteger bpp = vk_bytes_per_pixel(_format) ?: 4;
 	return _width * _height * _depth * _array * bpp * _samples * (_mips > 1 ? 2 : 1);

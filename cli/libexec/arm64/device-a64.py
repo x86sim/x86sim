@@ -163,7 +163,9 @@ def cmd_create(args):
                 pass
         # the copy's stores keep var/device-a64's absolute paths (lsd's csstore: every app's data container): its
         # apps ran in the base phone's containers. device-repath.py rewrites them / drops the caches that hold them.
-        subprocess.run([sys.executable, os.path.join(ROOT, "cli/libexec/arm64/device-repath.py"), dev, BASE])
+        # its report ("relinked ...", "rewrote ...") goes to stderr: stdout is only the new device's path, which callers
+        # (sim.rs create_device, the MCP sim_add_device) take whole as a path
+        subprocess.run([sys.executable, os.path.join(ROOT, "cli/libexec/arm64/device-repath.py"), dev, BASE], stdout=sys.stderr)
     env = dict(os.environ, X86SIM_ARCH="arm64", X86SIM_DEVICE=dev,
                X86SIM_RUNTIME=os.path.join(ROOT, "runtimes", rt, "RuntimeRoot"),
                X86SIM_STATE=os.environ.get("A64_STATE", os.path.join(VAR, "run-a64")), X86SIM_JOBLOG="1")

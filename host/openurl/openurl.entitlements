@@ -57,5 +57,23 @@
 	<true/>
 	<key>com.apple.springboard.frontmostApplication</key>
 	<true/>
+	<key>com.apple.systemstatus.domains</key>
+	<array>
+		<string>status-bar-overrides</string>
+	</array>
+	<key>com.apple.systemstatus.publisher.domains</key>
+	<array>
+		<string>status-bar-overrides</string>
+	</array>
+	<key>com.apple.UIKit.status-bar-override-allow</key>
+	<true/>
+	<key>com.apple.Pasteboard.background-access</key>
+	<true/>
+	<key>com.apple.Pasteboard.paste-unchecked</key>
+	<true/>
+	<key>com.apple.accessibility.api</key>
+	<true/>
+	<key>com.apple.private.security.delete.all</key>
+	<true/>
 </dict>
 </plist>

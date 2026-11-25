@@ -2,6 +2,8 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <vector>
 // libarm64jit: libsystem_kernel/platform/pthread exports that the generic pass-through can't serve: variadic
 // functions, function-pointer arguments (native -> guest trampolines), bool results, Darling names that differ from
@@ -66,45 +68,135 @@ static void h_key_delete(GuestThread &t, u32 i) {
 // Threads the guest creates start in thread_start(): pthread_exit on them unwinds back here (longjmp) and the thread
 // returns from its start routine instead. Darling's own pthread_exit killed the whole process (SIGABRT) when called
 // from a thread running guest code (backboardd).
-struct StartArg { u64 fn, arg, stack; };
+struct StartArg { u64 fn, arg, stack, serial; };
 // __builtin_setjmp/longjmp: glibc's fortified longjmp (__longjmp_chk) aborted on Darling's thread stacks
 using ExitJmp = void *[5];
 static thread_local ExitJmp *t_exit_jmp;
 static thread_local u64 t_exit_value;
-static void *thread_start(void *p) {
+// Stacks of the threads the guest started, by pthread_t, for pthread_get_stackaddr_np / _stacksize_np asked from
+// another thread. WebKit's WTF::Thread::create asks for the new thread's bounds from the creating thread right after
+// pthread_create; Darling's answer is the child's native stack, which guest code never runs on, so JavaScriptCore's
+// worker VMs failed StackBounds::contains and every page with a Web Worker or service worker crashed ("A problem
+// repeatedly occurred"). Each child publishes its guest stack here as soon as it has one (thread_start, after
+// ensure_stack); h_pthread_create marks the handle pending first, and a query about a pending child waits for it to
+// publish (it is already running toward that point; bounded, then Darling's answer as before).
+// Each start has a serial (StartArg): a pthread_t is reused once its thread is gone, and an entry a thread left behind
+// (it ended without passing stack_forget) must not answer for the new thread with that handle. The parent's pending
+// mark replaces any entry but the one its own child already published (same serial).
+namespace {
+struct KnownStack { bool ready = false; u64 top = 0, reported = 0, serial = 0; };
+std::mutex g_stacks_mu;
+std::condition_variable g_stacks_cv;
+std::unordered_map<u64, KnownStack> g_stacks;
+std::atomic<u64> g_start_serial{0};
+thread_local u64 t_start_serial;  // this thread's serial (0: not started by thread_start)
+u64 native_self() { static auto *self = (u64 (*)())dsym("pthread_self"); return self(); }
+void stack_pending(u64 handle, u64 serial) {
+    std::lock_guard<std::mutex> l(g_stacks_mu);
+    auto &e = g_stacks[handle];
+    if (e.serial != serial) e = {false, 0, 0, serial};  // a stale entry of an earlier thread with this handle goes
+}
+void stack_publish(const GuestThread &g) {
+    { std::lock_guard<std::mutex> l(g_stacks_mu); g_stacks[native_self()] = {true, g.stack_base + g.stack_size, g.stack_reported, t_start_serial}; }
+    g_stacks_cv.notify_all();
+}
+// idempotent; only this thread's own entry (by serial) is removed
+void stack_forget() {
+    std::lock_guard<std::mutex> l(g_stacks_mu);
+    auto it = g_stacks.find(native_self());
+    if (it != g_stacks.end() && it->second.serial == t_start_serial) g_stacks.erase(it);
+}
+// thread_start's outer frame: forgets the stack however the thread ends (a normal return, the pthread_exit longjmp,
+// or a forced unwind such as cancellation that passes no code of ours). Kept out of the setjmp frame (see below).
+struct StackForget { ~StackForget() { stack_forget(); } };
+// the child's published stack, waiting up to a second for a pending one; false: not a thread the guest started
+bool stack_of(u64 handle, KnownStack &out) {
+    std::unique_lock<std::mutex> l(g_stacks_mu);
+    auto it = g_stacks.find(handle);
+    if (it == g_stacks.end()) return false;
+    if (!it->second.ready && !g_stacks_cv.wait_for(l, std::chrono::seconds(1), [&] {
+            it = g_stacks.find(handle);
+            return it == g_stacks.end() || it->second.ready;
+        })) return false;
+    if (it == g_stacks.end()) return false;
+    out = it->second;
+    return true;
+}
+}  // namespace
+
+// After the longjmp nothing of thread_start's frame but its frame pointer can be trusted: clang reuses spill slots of
+// a returns_twice function for locals of the first path (the TLS address it reloaded after the jump was overwritten
+// by a.stack, 0x80000 for an NSThread: every pthread_exit faulted at 0x80058). The way back reads only TLS, in
+// functions of their own.
+struct ExitFrame { ExitJmp jb; ExitJmp *outer; };
+__attribute__((noinline)) static u64 thread_body(void *p) {
     StartArg a = *(StartArg *)p;
     delete (StartArg *)p;
-    ExitJmp jb;
-    ExitJmp *outer = t_exit_jmp;
-    t_exit_jmp = &jb;
+    t_start_serial = a.serial;
+    GuestThread &g = GuestThread::self();
+    g.ensure_stack(a.stack);
+    stack_publish(g);
+    return g.call(a.fn, {a.arg});
+}
+__attribute__((noinline)) static u64 thread_unwound() {
+    t_exit_jmp = ((ExitFrame *)t_exit_jmp)->outer;
+    u64 r = t_exit_value;
+    if (g_trace) logf("thread_start: unwound from pthread_exit (tid %ld)", (long)syscall(SYS_gettid));
+    GuestThread::self().reset_after_unwind();
+    if (g_trace) logf("thread_start: new Jit, returning %#lx", (unsigned long)r);
+    return r;
+}
+__attribute__((noinline)) static void *thread_start_jmp(void *p) {
+    ExitFrame f;
+    f.outer = t_exit_jmp;
+    t_exit_jmp = &f.jb;
     u64 r;
-    if (__builtin_setjmp(jb) == 0) { GuestThread &g = GuestThread::self(); g.ensure_stack(a.stack); r = g.call(a.fn, {a.arg}); }
-    else {
-        r = t_exit_value;
-        if (g_trace) logf("thread_start: unwound from pthread_exit (tid %ld)", (long)syscall(SYS_gettid));
-        GuestThread::self().reset_after_unwind();
-        if (g_trace) logf("thread_start: new Jit, returning %#lx", (unsigned long)r);
+    if (__builtin_setjmp(f.jb) == 0) {
+        r = thread_body(p);
+        t_exit_jmp = f.outer;
+    } else {
+        r = thread_unwound();
     }
-    t_exit_jmp = outer;
     return (void *)r;
 }
+static void *thread_start(void *p) {
+    StackForget forget;
+    return thread_start_jmp(p);
+}
 // the attr's stack size (Darling's pthread_attr_t: the guest's pthread_attr_* calls are native), 0 without an attr
-static void *start_arg(u64 fn, u64 arg, u64 attr) {
+static StartArg *start_arg(u64 fn, u64 arg, u64 attr) {
     size_t ss = 0;
     if (attr) {
         static auto *get = (int (*)(u64, size_t *))dsym("pthread_attr_getstacksize");
         if (!get || get(attr, &ss) != 0) ss = 0;
     }
-    return new StartArg{fn, arg, ss};
+    return new StartArg{fn, arg, ss, ++g_start_serial};
 }
 // pthread_create(thread, attr, start, arg) and the variants with the same arguments
+// A created thread's handle is marked pending (see g_stacks) unless it starts suspended: that one may not run for a
+// long time, and asking about it falls back to Darling's answer at once.
+static void created(u64 out, int r, bool suspended, u64 serial) {
+    if (r == 0 && out && !suspended) stack_pending(*(const u64 *)out, serial);
+}
 static void h_pthread_create(GuestThread &t, u32 i) {
     auto *fn = (int (*)(u64, u64, void *(*)(void *), void *))g_thunks[i].native;
-    t.set_x(0, (u32)fn(t.x(0), t.x(1), thread_start, start_arg(t.x(2), t.x(3), t.x(1))));
+    const u64 out = t.x(0);
+    StartArg *a = start_arg(t.x(2), t.x(3), t.x(1));
+    const u64 serial = a->serial;  // the child may have freed `a` by the time create returns
+    const int r = fn(out, t.x(1), thread_start, a);
+    if (r != 0) delete a;
+    created(out, r, g_thunks[i].name == "_pthread_create_suspended_np", serial);
+    t.set_x(0, (u32)r);
 }
 static void h_pthread_create_with_workgroup(GuestThread &t, u32) {  // (thread, workgroup, attr, start, arg)
     static auto *fn = (int (*)(u64, u64, void *(*)(void *), void *))dsym("pthread_create");
-    t.set_x(0, (u32)fn(t.x(0), t.x(2), thread_start, start_arg(t.x(3), t.x(4), t.x(2))));
+    const u64 out = t.x(0);
+    StartArg *a = start_arg(t.x(3), t.x(4), t.x(2));
+    const u64 serial = a->serial;
+    const int r = fn(out, t.x(2), thread_start, a);
+    if (r != 0) delete a;
+    created(out, r, false, serial);
+    t.set_x(0, (u32)r);
 }
 
 static void h_introspection_hook(GuestThread &t, u32 i) {
@@ -547,7 +639,13 @@ static void h_pthread_exit(GuestThread &t, u32 i) {
         static auto *self = (u64 (*)())dsym("pthread_self");
         u64 th = self(), exit_value = t.x(0);
         struct Rec { u64 routine, arg, next; };
+        // a record is a local of a guest frame (the macro's struct), so it lies on this thread's guest stack; anything
+        // else in that word is not a guest cleanup list. An NSThread ending ([NSThread exit] -> pthread_exit) had
+        // 0x80048 there and the walk faulted reading it (Preferences, backboardd once the accessibility bundles were
+        // loaded: they run NSThreads that end)
+        auto on_stack = [&](u64 a) { return t.stack_base && a >= t.stack_base && a + sizeof(Rec) <= t.stack_base + t.stack_size; };
         while (Rec *r = *(Rec **)(th + 8)) {
+            if (!on_stack((u64)r)) break;
             *(u64 *)(th + 8) = r->next;
             if (r->routine) t.call(r->routine, {r->arg});
         }
@@ -571,17 +669,22 @@ static void h_pthread_exit(GuestThread &t, u32 i) {
 
 // pthread_get_stackaddr_np / pthread_get_stacksize_np on the calling thread: the guest runs on its GuestThread's
 // stack, not on the native one Darling's pthread describes. libdispatch's _dispatch_clear_stack (end of
-// _dispatch_queue_cleanup2 after dispatch_main) bzeroed from sp to the native stack's bottom and faulted. Other
-// threads: native answer.
+// _dispatch_queue_cleanup2 after dispatch_main) bzeroed from sp to the native stack's bottom and faulted. Another
+// thread the guest started: its published guest stack (g_stacks). Anything else: native answer.
 static bool on_own_stack(GuestThread &t) {
-    static auto *self = (u64 (*)())dsym("pthread_self");
-    return t.x(0) == self() && t.stack_base && t.sp() - t.stack_base < t.stack_size;
+    return t.x(0) == native_self() && t.stack_base && t.sp() - t.stack_base < t.stack_size;
 }
 static void h_stackaddr(GuestThread &t, u32 i) {
-    if (on_own_stack(t)) t.set_x(0, t.stack_base + t.stack_size); else h_generic(t, i);
+    KnownStack k;
+    if (on_own_stack(t)) t.set_x(0, t.stack_base + t.stack_size);
+    else if (t.x(0) != native_self() && stack_of(t.x(0), k)) t.set_x(0, k.top);
+    else h_generic(t, i);
 }
 static void h_stacksize(GuestThread &t, u32 i) {
-    if (on_own_stack(t)) t.set_x(0, t.stack_reported); else h_generic(t, i);
+    KnownStack k;
+    if (on_own_stack(t)) t.set_x(0, t.stack_reported);
+    else if (t.x(0) != native_self() && stack_of(t.x(0), k)) t.set_x(0, k.reported);
+    else h_generic(t, i);
 }
 
 // pthread_kill/__pthread_kill/kill with SIGABRT (libc's abort): log the guest backtrace first
@@ -661,6 +764,7 @@ static void h_exit(GuestThread &t, u32 i) {  // __exit: the guest process ends h
     if (getenv("X86SIM_A64_AOT_BUILD")) jitcache_aot_build(t);
     print_stats();
     jitcache_save_on_exit();
+    dbg_exit_code((int)t.x(0));  // a debugger attached: "process exited with status"
     ((void (*)(int))g_thunks[i].native)((int)t.x(0));
 }
 

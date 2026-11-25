@@ -693,6 +693,8 @@ namespace {
 struct Forward final : Dynarmic::A64::UserCallbacks {
     static GuestThread &T() { return *t_self; }
     std::optional<uint32_t> MemoryReadCode(u64 a) override {
+        if (__builtin_expect(g_dbg_nbp.load(std::memory_order_relaxed) != 0, 0))
+            if (auto w = dbg_read_code(a)) return w;
         if (auto w = swiftconf_read_code(a)) return w;
         if (auto w = dyld_scan_read_code(a)) return w;
         if (auto w = swifttype_read_code(a)) return w;
@@ -876,6 +878,8 @@ static std::unique_ptr<Dynarmic::A64::Jit> make_jit(const Dynarmic::A64::UserCon
     return std::make_unique<Dynarmic::A64::Jit>(cfg);
 }
 
+std::unique_ptr<Dynarmic::A64::Jit> dbg_make_jit(GuestThread &t) { return make_jit(t.cfg); }
+
 GuestThread::GuestThread() {
     // The guest has its own TSD (tpidrro_el0): slots 0-9 (pthread_self, errno, mach thread self, ...) are copied from
     // Darling's native TSD (the gs base on x86_64); keys 10+ are the guest's alone. Sharing the native array let
@@ -1012,6 +1016,11 @@ NRet GuestThread::call(u64 pc, const u64 *ints, int nints, const u64 *fps, int n
     }();
     if (g_step && depth == 1) while (!finished) jit->Step();
     else while (!finished) {
+        // x86sim debug: parks here while the debugger has the process stopped; steps (gdbstub.cpp)
+        if (__builtin_expect(g_dbg_on.load(std::memory_order_relaxed) != 0, 0)) {
+            dbg_point(*this, 0);
+            if (finished) break;
+        }
         if (exec_lock) {
             std::lock_guard<std::mutex> g(*exec_lock);
             jit->Run();
@@ -1075,6 +1084,28 @@ static void profile_tick() {
     if (!top.empty()) logf("profile: dispatcher lookups by emitted call site:%s", top.c_str());
 }
 
+// x86sim debug (gdbstub.cpp): drops the translations of [addr, addr + len) for every thread, from any thread.
+void for_each_guest_thread(void (*fn)(GuestThread *, void *), void *arg);
+void dbg_invalidate(u64 addr, u64 len) {
+    if (!len) return;
+    if (shared_translations() && g_shared_code) {
+        // any Jit over the shared code: the shared path only takes the shared mutex and the emitter
+        struct A { u64 a, n; bool done; } x{addr, len, false};
+        std::lock_guard<std::mutex> l(dbg_threads_mutex());
+        for_each_guest_thread([](GuestThread *t, void *p) {
+            auto *x = (A *)p;
+            if (!x->done && t->jit) { t->jit->InvalidateCacheRange(x->a, x->n); x->done = true; }
+        }, &x);
+        return;
+    }
+    u64 r[2] = {addr, len};
+    std::lock_guard<std::mutex> l(dbg_threads_mutex());
+    for_each_guest_thread([](GuestThread *t, void *p) {
+        auto *x = (u64 *)p;
+        if (t->jit) t->jit->InvalidateCacheRange(x[0], x[1]);
+    }, r);
+}
+
 // RAM 4 (host.cpp file trim): fn(arg) under the shared emitter lock; false when there is no shared cache (yet).
 bool with_shared_code_lock(void (*fn)(void *), void *arg) {
     if (!shared_translations() || !g_shared_code) return false;
@@ -1101,6 +1132,7 @@ void GuestThread::CallSVC(uint32_t swi) {
     // Perf 17: every special svc is >= kMaxThunks (0xff00); a thunk call skips their ~15 compares
     if (__builtin_expect(swi < 0xff00u, 1)) goto thunk_call;
     if (swi == kExitSvc) { *done = true; jit->HaltExecution(); return; }
+    if (swi == kDbgSvc) { dbg_svc(*this, pc0 - 4); return; }
     if (swi == kSwiftConfSvc) { swiftconf_step(*this); return; }
     if (swi == kSwiftConfVerifySvc) { swiftconf_verify(*this); return; }
     if (swi == kDyldScanSvcA || swi == kDyldScanSvcB) { dyld_scan_step(*this, swi == kDyldScanSvcB); return; }
@@ -1295,6 +1327,7 @@ void GuestThread::CallSVC(uint32_t swi) {
             }
         }
         susp_safe_point();  // registers are in the Jit at an svc
+        if (__builtin_expect(g_dbg_on.load(std::memory_order_relaxed) != 0, 0)) dbg_point(*this, 1);
         if (gbt_on()) gbt_svc_hook();
         int32_t outer_thunk = in_thunk; in_thunk = (int32_t)swi;
         native = true;
@@ -1346,6 +1379,7 @@ void GuestThread::CallSVC(uint32_t swi) {
         tsd_from_native();
         in_thunk = outer_thunk;
         susp_safe_point();
+        if (__builtin_expect(g_dbg_on.load(std::memory_order_relaxed) != 0, 0)) dbg_point(*this, 2);
         if (svc_time) {
             u64 dt = __builtin_ia32_rdtsc() - t0;
             u64 n = svc_timed.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1364,7 +1398,11 @@ void GuestThread::CallSVC(uint32_t swi) {
     if (skip_ret && in_thunk < 0 && jit->GetPC() == pc0 && rd<u32>(pc0) == 0xD65F03C0u) jit->SetPC(x(30));
 }
 
-std::optional<uint32_t> GuestThread::MemoryReadCode(u64 a) { return guest_code_word(a); }
+std::optional<uint32_t> GuestThread::MemoryReadCode(u64 a) {
+    if (__builtin_expect(g_dbg_nbp.load(std::memory_order_relaxed) != 0, 0))
+        if (auto w = dbg_read_code(a)) return w;
+    return guest_code_word(a);
+}
 
 bool fp16_interpret(GuestThread &t, u32 insn);
 void GuestThread::InterpreterFallback(u64 pc, size_t n) {
@@ -1375,6 +1413,7 @@ void GuestThread::InterpreterFallback(u64 pc, size_t n) {
     // udf (permanently undefined, 0x0000xxxx), or an encoding dynarmic does not implement: SIGILL for the guest's
     // handler as on XNU (ILL_ILLTRP); without one, udf dies by SIGILL after the report, anything else aborts (x86Sim gap)
     const uint32_t insn = guest_code_word(pc).value_or(0);
+    if (g_dbg_on.load()) dbg_exception(*this, pc, 4, 2 /* EXC_BAD_INSTRUCTION */, 1, insn);
     if (guest_sync_signal(*this, 4, 2, pc, pc, pc, 1u << 25)) return;
     logf("unimplemented instruction %08x at %#lx lr %#lx sp %#lx x0 %#lx x16 %#lx x17 %#lx", rd<uint32_t>(pc), (unsigned long)pc,
          (unsigned long)x(30), (unsigned long)sp(), (unsigned long)x(0), (unsigned long)x(16), (unsigned long)x(17));
@@ -1500,6 +1539,9 @@ void GuestThread::ExceptionRaised(u64 pc, Dynarmic::A64::Exception e) {
     const uint32_t esr = e == E::Breakpoint ? (0x3Cu << 26 | 1u << 25 | (insn >> 5 & 0xffff))   // BRK64
                          : nx ? (0x20u << 26 | 1u << 25 | 0x07)                                   // instruction abort
                               : (0x00u << 26 | 1u << 25);                                         // unknown
+    // the debugger first (EXC_BREAKPOINT for brk: Swift / clang traps; EXC_BAD_ACCESS; EXC_BAD_INSTRUCTION)
+    if (g_dbg_on.load())
+        dbg_exception(*this, pc, dsig, dsig == 5 ? 6 : dsig == 11 ? 1 : 2, dsig == 5 ? 1 : dsig == 11 ? 1 : 1, dsig == 5 ? insn : pc);
     if (guest_sync_signal(*this, dsig, dcode, pc, pc, pc, esr)) return;
     // no guest handler: report like a crash with the guest registers, then die by that signal (as XNU's default action)
     logf("guest exception %d at pc %#lx %s (insn %08x) lr %#lx sp %#lx%s", (int)e, (unsigned long)pc, where(pc).c_str(), insn,

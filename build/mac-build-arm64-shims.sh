@@ -3,7 +3,7 @@
 # the guest's frameworks, so they must be guest code): simshim, SimFramebuffer (simfb), SimulatorHID (simhid),
 # metalhostd (+vkmtl), iosurfaced, mtlprobe, openurl, netconfig, fpsim2host, nisimhost, fseventsd, mmhost. Output under host/<name>/arm64/ (mksimdevice.py picks
 # them up).
-# Usage: build/mac-build-arm64-shims.sh [simshim simaudio simfb simhid metalhostd iosurfaced mtlprobe openurl netconfig fpsim2host nisimhost fseventsd mmhost]
+# Usage: build/mac-build-arm64-shims.sh [simshim simax simaudio simfb simhid metalhostd iosurfaced mtlprobe openurl netconfig fpsim2host nisimhost fseventsd mmhost]
 # Platforms 1: X86SIM_PLATFORM=tvos|watchos builds the same for the tvOS / watchOS simulator (dyld_sim takes only
 # Mach-Os of its own platform) into host/<name>/arm64-tvos|arm64-watchos (default ios: host/<name>/arm64).
 set -e
@@ -39,6 +39,15 @@ simshim)
 		cc() { $CC -O1 -Wall -Wno-unused-variable -Wno-deprecated-declarations \"\$@\"; } &&
 		cc -c -o simshim.o simshim.c && cc -c -DSIMSHIM_OSLOG -o oslog.o oslogdiag.m &&
 		cc -dynamiclib -framework IOKit -framework CoreFoundation -lobjc -lsqlite3 -Wl,-U,_BSPathExistsOnSystemPartition -o libsimshim.dylib simshim.o oslog.o" ;;
+simax)
+	# the accessibility reader for agents (snapshot / type; libsimshim dlopens it in processes with UIKit)
+	# WebKit where the platform has it (not tvOS / watchOS); the visionOS / watchOS SDKs with headers are the -xcode ones
+	axsdk=; axweb="-framework WebKit"
+	case ${X86SIM_PLATFORM:-ios} in tvos) axweb= ;; watchos) axweb=; axsdk="SDK_WATCHOS=$X/sdks/WatchSimulator-xcode.sdk" ;;
+		xros) axsdk="SDK_XROS=$X/sdks/XRSimulator-xcode.sdk" ;; esac
+	tar cf - -C "$X/host/simax" simax.m | build a64ax "$X/host/simax/arm64$SUF/libsimax.dylib" "$axsdk $CC \
+		-O1 -Wall -Wno-unused-function -Wno-deprecated-declarations -Wno-unguarded-availability-new -fobjc-arc -dynamiclib \
+		-framework Foundation -framework CoreGraphics -framework QuartzCore -framework UIKit $axweb -o libsimax.dylib simax.m" ;;
 simaudio)
 	# Speed 27: the audio devices (CoreAudio HAL stand-in, host/simaudio) for arm64 processes:
 	# flat namespace + dynamic lookup, CoreAudio references weak (inert in processes without CoreAudio)
@@ -70,7 +79,7 @@ mtlprobe)
 		-fobjc-arc -framework Foundation -framework Metal -framework IOSurface -o mtlprobe mtlprobe.m" ;;
 openurl)
 	# arm64 sim target. Linux inotify via svc #0xfffe.
-	tar cf - -C "$X/host/openurl" openurl.m openurl.entitlements | build_exe a64openurl "$X/host/openurl/arm64$SUF/openurl" "$CC \
+	tar cf - -C "$X/host/openurl" openurl.m devctl.m openurl.entitlements | build_exe a64openurl "$X/host/openurl/arm64$SUF/openurl" "$CC \
 		-O1 -g -Wall -Wno-deprecated-declarations \
 		-fobjc-arc -framework Foundation -Wl,-sectcreate,__TEXT,__entitlements,openurl.entitlements -o openurl openurl.m" ;;
 netconfig)

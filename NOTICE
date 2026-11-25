@@ -21,6 +21,12 @@ lzfse                BSD-3-Clause (Apple Inc.)                 linux/arm64jit/th
 ipsw (tool)          MIT                                       https://github.com/blacktop/ipsw
 7-Zip 7zz (tool)     LGPL-2.1-or-later + unRAR restriction     https://www.7-zip.org
 dnspython            ISC                                       https://github.com/rthalley/dnspython
+rcodesign (tool)     MPL-2.0                                   https://github.com/indygreg/apple-platform-rs
+Web Inspector        BSD-2-Clause (WebKit; with CodeMirror MIT,    https://webkitgtk.org/releases/webkitgtk-2.54.3.tar.xz
+frontend             Esprima BSD-2-Clause, three.js MIT, CSS    (Source/WebInspectorUI; files taken from the
+(WebInspectorUI)     documentation MIT)                        built webkit2gtk-4.1 2.54.3-1 package)
+omarchy-apple-dev    MIT                                       https://github.com/x86sim/omarchy-apple-dev (branch main)
+(x86sim dev scripts)
 Rust crates          MIT / Apache-2.0 and others: see each     tools/launcher/Cargo.lock, linux/mtlvk/Cargo.lock
                      crate (crates.io)
 

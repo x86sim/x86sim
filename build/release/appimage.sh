@@ -6,7 +6,8 @@
 #              zsync); "none" for no update info
 # Nothing from Apple goes in: the payload is `git ls-files` of our own dirs (the committed simulator-side binaries are
 # ours, built from host/ sources) plus build outputs; check_no_apple below refuses a tree with Apple runtime/SDK files.
-# Third-party tools are downloaded pinned (sha256 checked): ipsw (MIT), 7-Zip's 7zz (LGPL-2.1 + unRAR), dnspython (ISC).
+# Third-party tools are downloaded pinned (sha256 checked): ipsw (MIT), 7-Zip's 7zz (LGPL-2.1 + unRAR), dnspython (ISC),
+# and WebKit's Web Inspector frontend (BSD-2 + MIT, from a pinned WebKitGTK package: build/webinspector.sh).
 set -e
 X=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=$(cd "${OUT:-$X/build/release/out}" && pwd)
@@ -24,6 +25,8 @@ IPSW_VER=3.1.741
 IPSW_SHA=${IPSW_SHA:-992a93c708861c14118ebd69c3493d2f5d0af08f57fb345839630ece3e227b20}
 SZ_VER=2604
 SZ_SHA=${SZ_SHA:-fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd}
+RCS_VER=0.29.0
+RCS_SHA=${RCS_SHA:-dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002}
 DNS_VER=2.8.0
 DNS_SHA=${DNS_SHA:-01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af}
 
@@ -43,10 +46,18 @@ echo "== payload (version $VERSION)"
 git -C "$X" ls-files -z -- cli host linux tools/debug tools/runtime tests docs/RELEASE.md README.md LICENSE* \
 	| (cd "$X" && xargs -0 cp --parents -t "$P" 2>/dev/null) || true
 rm -rf "$P/linux/mtlvk/src" "$P/tests/metal/shaders"
+# omarchy-apple-dev (submodule, our fork): the scripts and tools `x86sim dev` runs, not its receipts, docs, tests or
+# demos. The toolchain itself (Swift, xtool, the SDK from the user's Xcode.xip) installs at runtime into user dirs.
+O=$X/external/omarchy-apple-dev
+[ -f "$O/install-toolchain.sh" ] || { echo "appimage: external/omarchy-apple-dev is not checked out (git submodule update --init external/omarchy-apple-dev)" >&2; exit 1; }
+mkdir -p "$P/external/omarchy-apple-dev"
+git -C "$O" ls-files -z -- install-toolchain.sh ship.sh ship-mac.sh device-run.sh tools sdk-free flutter kmp patches compat \
+	LICENSE README.md CHANGELOG.md docs/DISTROS.md | (cd "$O" && xargs -0 cp --parents -t "$P/external/omarchy-apple-dev")
+echo "  omarchy-apple-dev $(git -C "$O" describe --tags --always), $(du -sh "$P/external/omarchy-apple-dev" | cut -f1)"
 # build outputs at the paths the scripts and the launcher expect (repo-relative)
 mkdir -p "$P/linux/mtlvk/target/release" "$P/tools/launcher/target/release"
 cp "$OUT/cargo-mtlvk/release/mtlvk" "$P/linux/mtlvk/target/release/"
-for b in x86sim-launcher x86sim-aot x86sim-mcp; do cp "$OUT/cargo-launcher/release/$b" "$P/tools/launcher/target/release/"; done
+for b in x86sim-launcher x86sim-aot x86sim-mcp x86sim-dev x86sim-ax x86sim-serve x86sim-pool x86sim-devapp; do cp "$OUT/cargo-launcher/release/$b" "$P/tools/launcher/target/release/"; done
 strip --strip-debug "$P/linux/mtlvk/target/release/mtlvk" "$P/tools/launcher/target/release/"*
 echo "$VERSION" > "$S/VERSION"
 
@@ -70,11 +81,18 @@ rm -rf "$OUT/tmp-ipsw"
 fetch "https://www.7-zip.org/a/7z$SZ_VER-linux-x64.tar.xz" 7z.tar.xz "$SZ_SHA"
 mkdir -p "$OUT/tmp-7z" && tar xJf "$DL/7z.tar.xz" -C "$OUT/tmp-7z" && cp "$OUT/tmp-7z/7zz" "$S/bin/7zz" && cp "$OUT/tmp-7z/License.txt" "$S/bin/LICENSE.7zip"
 rm -rf "$OUT/tmp-7z"
+# rcodesign: ad-hoc re-signing of device builds converted for the simulator (x86sim install X.ipa, core/src/devapp.rs)
+fetch "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$RCS_VER/apple-codesign-$RCS_VER-x86_64-unknown-linux-musl.tar.gz" rcodesign.tar.gz "$RCS_SHA"
+mkdir -p "$OUT/tmp-rcs" && tar xzf "$DL/rcodesign.tar.gz" -C "$OUT/tmp-rcs" && cp "$OUT/tmp-rcs"/apple-codesign-*/rcodesign "$S/bin/rcodesign" && cp "$OUT/tmp-rcs"/apple-codesign-*/COPYING "$S/bin/LICENSE.rcodesign"
+rm -rf "$OUT/tmp-rcs"
 # runtime-fetch.py runs `7z`
 ln -s 7zz "$S/bin/7z"
 DNS_URL=$(curl -fsSL "https://pypi.org/pypi/dnspython/$DNS_VER/json" | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["filename"].endswith(".whl")))')
 fetch "$DNS_URL" dnspython.whl "$DNS_SHA"
 python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$DL/dnspython.whl" "$S/pylib"
+# x86sim inspect's frontend (share/inspect.rs), so the AppImage needs no WebKitGTK; AppRun copies it next to the payload
+WEBINSPECTOR_DL=$DL "$X/build/webinspector.sh" "$OUT/webinspector"
+cp -a "$OUT/webinspector" "$S/webinspector"
 
 echo "== licenses"
 mkdir -p "$S/licenses"
@@ -84,6 +102,8 @@ for f in "$X"/external/metal2vulkan/LICENSE*; do [ -f "$f" ] && cp "$f" "$S/lice
 cp "$X/linux/arm64jit/third_party/astcenc/LICENSE.txt" "$S/licenses/astcenc-LICENSE" 2>/dev/null || true
 cp "$X/linux/arm64jit/third_party/lzfse/LICENSE" "$S/licenses/lzfse-LICENSE" 2>/dev/null || true
 cp "$X/LICENSE" "$S/licenses/x86sim-LICENSE"
+cp "$X/external/omarchy-apple-dev/LICENSE" "$S/licenses/omarchy-apple-dev-LICENSE"
+cp "$S/webinspector/LICENSE" "$S/licenses/webinspector-LICENSE"
 cp "$X/NOTICE" "$S/NOTICE"
 
 echo "== Apple content check"

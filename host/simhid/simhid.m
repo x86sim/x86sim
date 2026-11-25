@@ -802,6 +802,48 @@ static void watch_gesture(int type) {
 	slog("gesture %d", type);
 }
 
+static bool hwkb_on = true;   // the hardware keyboard's connection (hwkb connect|disconnect)
+// Keyboard: the hardware keyboard's connection (hwkb, below): GraphicsServices' simulator state, remembered in
+// <SIMULATOR_SHARED_RESOURCES_DIRECTORY>/hwkeyboard (connected | disconnected) for the next boot and the host's tools
+static void hwkb_set(bool on) {
+	int tok;
+	hwkb_on = on;
+	if (notify_register_check("GSEventHardwareKeyboardAttached", &tok) == NOTIFY_STATUS_OK) {
+		notify_set_state(tok, on ? 1 : 0);
+		notify_cancel(tok);
+	}
+	notify_post("GSEventHardwareKeyboardAttached");
+	write_shared_file("hwkeyboard", on ? "connected" : "disconnected");
+	slog("hardware keyboard %s", on ? "connected" : "disconnected");
+}
+// backboardd attaches the hardware keyboard itself whenever a keyboard service arrives (GSEventHardwareKeyboardAttached
+// went 0 -> 1 at our on-demand keyboard's first key): while disconnected it is put back at once, so keys of a
+// disconnected keyboard still type (as in Apple's simulator) and the software keyboard stays up
+static void hwkb_watch(void) {
+	int tok;
+	notify_register_dispatch("GSEventHardwareKeyboardAttached", &tok, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(int t) {
+		uint64_t st = 0;
+		notify_get_state(t, &st);
+		pthread_mutex_lock(&cmd_mu);
+		if (!hwkb_on && (st & 1)) {
+			slog("hardware keyboard attached by the system (state %llu) while disconnected: detached again", (unsigned long long)st);
+			hwkb_set(false);
+		}
+		pthread_mutex_unlock(&cmd_mu);
+	});
+}
+static bool hwkb_saved_on(void) {
+	const char* d = getenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY");
+	char p[1100], t[32] = "";
+	if (!d) return true;
+	snprintf(p, sizeof p, "%s/hwkeyboard", d);
+	FILE* f = fopen(p, "r");
+	if (!f) return true;
+	if (!fgets(t, sizeof t, f)) *t = 0;
+	fclose(f);
+	return strncmp(t, "disconnected", 12) != 0;
+}
+
 static bool handle_inputs2(char* line) {
 	char a[32] = "", b[32] = "";
 	if (!strcmp(line, "appswitcher")) {
@@ -836,6 +878,18 @@ static bool handle_inputs2(char* line) {
 		if (platform != P_WATCH) { slog("no hand gestures on this device"); return true; }
 		watch_gesture(!strcmp(a, "doubletap") ? 0 : !strcmp(a, "wristflick") ? 1 : atoi(a));
 		note_input();
+		return true;
+	}
+	if (sscanf(line, "hwkb %31s", a) == 1) {
+		// Keyboard: I/O > Keyboard > Connect Hardware Keyboard, as CoreSimulator's -[SimDevice
+		// setHardwareKeyboardEnabled:keyboardType:error:] does it: CoreSimulatorBridge calls GraphicsServices'
+		// GSEventSetHardwareKeyboardAttachedWithCountryCodeAndType(enabled, 0, type), which in a simulator is the state
+		// of the darwin notification GSEventHardwareKeyboardAttached (attached | country << 8 | type << 16) + a post
+		// (read in Apple's iOS 27.2 simulator: 1 at boot, 0 after a disconnect). UIKit reads it: disconnected, the
+		// software keyboard shows on every focus and stays up while keys come in (they still type).
+		if (!strcmp(a, "connect") || !strcmp(a, "on")) hwkb_set(true);
+		else if (!strcmp(a, "disconnect") || !strcmp(a, "off")) hwkb_set(false);
+		else slog("hwkb: connect|disconnect, not %s", a);
 		return true;
 	}
 	if (!strcmp(line, "shake")) {
@@ -925,8 +979,8 @@ static void handle_line(char* line, Client* cl) {
 		send_touch(a, x, y, edge);
 		return;
 	}
-	unsigned usage;
-	if (sscanf(line, "key %15s %i", a, &usage) == 2) {
+	unsigned usage, kpage = 7;
+	if (sscanf(line, "key %15s %i %i", a, &usage, &kpage) >= 2) {
 		// x86Sim arm64: the keyboard service is attached at the first key command (see initUsingHIDService).
 		// Speed 31 held this client's keys for a fixed 1.5 s after every attach (keys 300 ms after the first were
 		// lost or scrambled). Input: host keyboard latency (kblat.py) found the attach itself is ready in ~0.1 s
@@ -943,6 +997,17 @@ static void handle_line(char* line, Client* cl) {
 			add_service(hid_system, &keyboard_svc);
 			const char* ms = getenv("SIMHID_KB_SETTLE_MS");
 			wait_ns = (int64_t)(cl && cl->kb_settle_ms >= 0 ? cl->kb_settle_ms : ms && *ms ? atoi(ms) : 150) * 1000000;
+			// r2: the first attach of a boot needs longer. UIKit's switch into hardware-keyboard mode is cold then (its
+			// code not yet translated in the processes involved): Shift + h e l l o typed 150 ms after it came out as
+			// "HELLO WORLD" (from the browser view and from a plain simhid client alike), 500 ms and 1000 ms
+			// after it as typed; every later attach in the boot, also the first one in another app, typed right at
+			// 150 ms. SIMHID_KB_FIRST_SETTLE_MS (default 800) for that first one, a client's kbsettle still wins.
+			static int attaches;
+			if (!attaches++ && !(cl && cl->kb_settle_ms >= 0)) {
+				const char* f = getenv("SIMHID_KB_FIRST_SETTLE_MS");
+				const int64_t first = (int64_t)(f && *f ? atoi(f) : 800) * 1000000;
+				if (first > wait_ns) wait_ns = first;
+			}
 		}
 		{
 			static int64_t guard = -1;
@@ -964,7 +1029,8 @@ static void handle_line(char* line, Client* cl) {
 		kb_down += !strcmp(a, "down") ? 1 : -1;
 		if (kb_down < 0) kb_down = 0;
 		pthread_cond_signal(&kb_cv);
-		send_key(&keyboard_svc, 7, usage, !strcmp(a, "down"));
+		// a page after the usage: another page's key on the keyboard (12 0x1ae: the on-screen keyboard key, softkb)
+		send_key(&keyboard_svc, kpage, usage, !strcmp(a, "down"));
 		return;
 	}
 	int secs;
@@ -1385,6 +1451,27 @@ static void* listen_thread(void* arg) {
 	// x86Sim arm64: an attached keyboard service puts UIKit in hardware-keyboard mode, so a text field never shows the
 	// software keyboard. Attach it only when the host first types (like Xcode's simulator does); SIMHID_KEYBOARD=1: at start.
 	hid_system = system;
+	// Keyboard: a hardware keyboard disconnected before (x86sim keyboard hardware disconnect) stays so across boots, as
+	// a device's setting in Apple's Simulator
+	{
+		int tok; uint64_t st = 0;
+		if (notify_register_check("GSEventHardwareKeyboardAttached", &tok) == NOTIFY_STATUS_OK) {
+			notify_get_state(tok, &st);
+			notify_cancel(tok);
+		}
+		slog("GSEventHardwareKeyboardAttached at start: %llu", (unsigned long long)st);
+	}
+	hwkb_watch();
+	if (!hwkb_saved_on()) {
+		hwkb_set(false);
+		// again once the system is up (notifyd and UIKit's readers start after backboardd)
+		for (int i = 1; i <= 2; i++)
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)i * 20 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+				pthread_mutex_lock(&cmd_mu);
+				if (!hwkb_on) hwkb_set(false);
+				pthread_mutex_unlock(&cmd_mu);
+			});
+	}
 	const char* kb = getenv("SIMHID_KEYBOARD");
 	if (kb && *kb == '1')
 		add_service(system, &keyboard_svc);

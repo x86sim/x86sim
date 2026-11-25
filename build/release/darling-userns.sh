@@ -27,7 +27,11 @@ ln -sfn "$TREE" "$O/x86sim/darling"
 if ! p=$(holder); then
 	: > "$O/x86sim/.holder-$ID"
 	rm -f "$PIDF"
-	setsid unshare -r -m sh -c 'mount --bind "$1" /opt && echo $$ > "$2" && exec sleep 2147483647' sh "$O" "$PIDF" \
+	# the holder outlives this command: it must not keep what it inherited open. From the AppImage that is an fd on
+	# its FUSE mount (and the runtime's pipe), so the AppImage process and its /tmp/.mount_* stayed for as long as
+	# the holder lived. bash (cli/x86sim needs it anyway): sh may be dash, which cannot name fds above 9.
+	setsid unshare -r -m bash -c 'for f in /proc/$$/fd/*; do f=${f##*/}; [ "$f" -gt 2 ] && eval "exec $f>&-"; done
+		mount --bind "$1" /opt && echo $$ > "$2" && exec sleep 2147483647' sh "$O" "$PIDF" \
 		< /dev/null > "$C/userns-$ID.log" 2>&1 &
 	i=0
 	until p=$(holder); do

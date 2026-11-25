@@ -9,6 +9,7 @@ and appends it to `Documents/x86test-results.txt` in the app's data container.
 | x86ui | SwiftUI List (200 rows), NavigationStack push/pop, repeating animation, TextField + keyboard, SF Symbols, UIGraphicsImageRenderer → PNG |
 | x86net | URLSession HTTPS GET + JSON, download task, WKWebView page load (+ JS `document.title`) |
 | x86data | UIKit scene lifecycle, Core Data (SQLite store, model built in code), files (write/rename/attributes), UserDefaults, Core Image blur → PNG, local notification (authorization prompt, schedule, delivery) |
+| x86webinspect | two WKWebViews for Web Inspector (`x86sim inspect`, MCP `web_*`): `isInspectable = true` (listed: console logs, a fetch, `window.appValue`) and one without (not listed) |
 
     tests/apps/build.sh [app...]                 build on the Mac (X86SIM_MAC) into $X86SIM_SCRATCH/apps/
     tests/apps/run.sh <phone> [--no-build] [app...]
@@ -19,6 +20,21 @@ and appends it to `Documents/x86test-results.txt` in the app's data container.
 `<phone>` is a phone's name, folder or dir (as `x86sim install`). The phone must be running.
 Apps without the UIScene lifecycle trap in iOS 27's UIKit (`_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`),
 so every app here uses scenes.
+
+## XCTestDemo: XCTest and XCUITest (`x86sim test`)
+
+`XCTestDemo/` is an Xcode project (a SwiftUI app with an app-hosted unit test target, a logic test target and a UI
+test target; each has a deliberate failure, the unit tests a skip) and `XCTestDemo/spm/` a Swift package with XCTest
+and Swift Testing tests:
+
+    tests/apps/XCTestDemo/build.sh [OUT]          xcodebuild build-for-testing on the Mac (X86SIM_MAC); products and
+                                                 the .xctestrun into $X86SIM_SCRATCH/apps/XCTestDemo-products
+    tests/apps/XCTestDemo/run.sh <phone> [--no-build] [--no-ui]
+                                                 x86sim test --xctestrun, then every result checked against Apple's
+                                                 simulator (Xcode 27.2, iOS 27.2: 14 tests, 9 passed, 4 failed with
+                                                 their file:line, 1 skipped)
+    x86sim test <phone> --spm tests/apps/XCTestDemo/spm
+                                                 the package's tests built on Linux (x86sim dev toolchain) and run
 
 ## sdkcov: the whole SDK, on iOS, tvOS, watchOS and visionOS
 

@@ -145,6 +145,35 @@ impl Ring {
         None
     }
 
+    /// Share: runs `f` on the newest slot in place, without copying the frame (a Frame whose `bgra` is empty; the pixels
+    /// are the slice), and returns its result if the slot was not rewritten meanwhile (a torn read gives None).
+    pub fn latest_with<R>(&mut self, f: impl FnOnce(&Frame, &[u8]) -> R) -> Option<R> {
+        if !self.open() {
+            return None;
+        }
+        let mm = self.mm.as_ref().unwrap();
+        if &mm[..4] != b"SFBR" {
+            return None;
+        }
+        let nslots = u32_at(mm, 8) as usize;
+        let slot_bytes = u32_at(mm, 12) as usize;
+        let latest = u32_at(mm, 40) as usize;
+        if u64_at(mm, 32) == 0 || latest >= nslots {
+            return None;
+        }
+        let o = 64 + 32 * latest;
+        let sseq = u64_at(mm, o);
+        let (w, h, stride) = (u32_at(mm, o + 16), u32_at(mm, o + 20), u32_at(mm, o + 24));
+        let base = HDR + latest * slot_bytes;
+        let end = base + stride as usize * h as usize;
+        if sseq == 0 || (stride as usize) * (h as usize) > slot_bytes || end > mm.len() || (stride as usize) < w as usize * 4 {
+            return None;
+        }
+        let fr = Frame { w, h, stride, seq: sseq, t_ns: u64_at(mm, o + 8), bgra: Vec::new() };
+        let r = f(&fr, &mm[base..end]);
+        (u64_at(mm, o) == sseq).then_some(r)
+    }
+
     /// Blocks until seq differs from `seq`, the ring is recreated, or `timeout` passes.
     pub fn wait(&mut self, seq: u64, timeout: Duration) -> u64 {
         let end = Instant::now() + timeout;

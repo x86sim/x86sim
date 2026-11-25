@@ -476,10 +476,27 @@ def cmd_log(a):
         pass
 
 
+def device_ring():
+    """The frame ring of this device (its sim.env SIMFB_RING, a Linux path under /Volumes/SystemRoot). x86Sim: io
+    screenshot / recordVideo read fbring's default (the main device's ring) whatever device was named, so another phone
+    was recorded, or nothing ("no frames") when the main phone was off. SIMFB_RING_LINUX still overrides."""
+    if os.environ.get("SIMFB_RING_LINUX"):
+        return os.environ["SIMFB_RING_LINUX"]
+    try:
+        for l in open(os.path.join(x86config.device(), "sim.env")):
+            if l.startswith("SIMFB_RING="):
+                p = l.split("=", 1)[1].strip()
+                return p[len("/Volumes/SystemRoot"):] if p.startswith("/Volumes/SystemRoot/") else p
+    except OSError:
+        pass
+    import fbring
+    return fbring.RING
+
+
 def cmd_io(a):
     if a[:1] == ["screenshot"]:
         out = a[1] if len(a) > 1 else "screenshot.png"
-        subprocess.run([sys.executable, os.path.join(HERE, "fb2png.py"), "ring", out, "1"], check=True,
+        subprocess.run([sys.executable, os.path.join(HERE, "fb2png.py"), device_ring(), out, "1"], check=True,
                        stdout=subprocess.DEVNULL)
         print(out)
     elif a[:1] == ["recordVideo"]:
@@ -505,7 +522,7 @@ def record(a):
     if len(a) != 1:
         die("usage: x86sim io recordVideo [--codec h264|hevc] [--secs N] [--fps N] <out.mp4>", 2)
     out = a[0]
-    ring = fbring.Ring()
+    ring = fbring.Ring(device_ring())
     f = ring.latest()
     if not f:
         die("x86sim io recordVideo: no frames (is the device booted?)")
@@ -518,9 +535,13 @@ def record(a):
                            "-f", "rawvideo", "-pix_fmt", "bgra", "-s", "%dx%d" % (stride // 4, h), "-r", str(fps),
                            "-i", "-", "-vf", "crop=%d:%d:0:0" % (w - w % 2, h - h % 2), "-c:v", enc, "-pix_fmt",
                            "yuv420p", "-movflags", "+faststart", out], stdin=subprocess.PIPE,
-                          preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+                          start_new_session=True)
+    # x86Sim: SIGTERM (a tool stopping the recording: a wrapper script, timeout, the MCP server) ends it as Ctrl-C does. It
+    # killed the recorder before, and a kill of the process group killed ffmpeg too, before it wrote the moov atom: the
+    # mp4 was unplayable. ffmpeg runs in a session of its own and finishes the file after its input closes.
     stop = []
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     print("x86sim: recording %s (Ctrl-C to stop)" % out, file=sys.stderr, flush=True)
     frame, seq, n = f[5], f[3], 0
     period = 1.0 / fps

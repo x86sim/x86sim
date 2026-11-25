@@ -1,7 +1,11 @@
 #!/bin/bash
 # x86Sim: `x86sim install|uninstall`, as `xcrun simctl install|uninstall` on a Mac (`x86sim launch`: simctl.py).
-#   install <path.app>             copy the bundle into the device and have installd install it (through
-#                                  LaunchServices -> InstallCoordination -> installd, in host/openurl inside the device)
+#   install <path.app|.ipa|.xcarchive>
+#                                  copy the bundle into the device and have installd install it (through
+#                                  LaunchServices -> InstallCoordination -> installd, in host/openurl inside the device).
+#                                  A device build (.ipa, .xcarchive, device .app) is made a simulator .app first by
+#                                  x86sim-devapp (tools/launcher core/src/devapp.rs: Mach-O platform retag, Info.plist,
+#                                  ad-hoc re-sign keeping entitlements); FairPlay-encrypted App Store apps are refused
 #   uninstall <bundle id>
 # An optional first argument names the device, as simctl's <device>: a device dir, or an arm64 phone's name / folder
 # (var/device-a64-<name>, as `x86sim device list` shows; "booted" = the default). Else X86SIM_DEVICE.
@@ -28,7 +32,20 @@ request() {  # request LINE PATTERN TIMEOUT
 }
 case $cmd in
 install)
-	app=${1%/}; [ -f "$app/Info.plist" ] || { echo "usage: x86sim install <path.app>" >&2; exit 2; }
+	app=${1%/}
+	[ -n "$app" ] && [ -e "$app" ] || { echo "usage: x86sim install <path.app|path.ipa|path.xcarchive>" >&2; exit 2; }
+	# device builds: converted into a work dir under the scratch dir (never /tmp: RAM), removed when this ends.
+	# X86SIM_NO_CONVERT: the caller (the launcher's apps::install) already did it
+	if [ -z "${X86SIM_NO_CONVERT:-}" ]; then
+		conv=$X86SIM_ROOT/tools/launcher/target/release/x86sim-devapp
+		if [ -x "$conv" ]; then
+			W=$X86SIM_SCRATCH/devapp/install-$$; trap 'rm -rf "$W"' EXIT
+			app=$("$conv" convert "$app" --work "$W") || exit 1
+		elif [ ! -f "$app/Info.plist" ]; then
+			echo "x86sim install: $app needs x86sim-devapp (cd tools/launcher && cargo build --release)" >&2; exit 1
+		fi
+	fi
+	[ -f "$app/Info.plist" ] || { echo "usage: x86sim install <path.app|path.ipa|path.xcarchive>" >&2; exit 2; }
 	# staging copy inside the device's data directory (visible inside Darling); installd copies it again
 	S=$D/tmp/x86sim-install; mkdir -p "$S"; rm -rf "$S/$(basename "$app")"
 	cp -a "$app" "$S/" || exit 1

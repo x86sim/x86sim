@@ -237,7 +237,19 @@ pub fn create_device(model: &str, name: &str, runtime_root: &Path) -> Result<Pat
     }
     let out = cmd.current_dir(repo_root()).stdin(Stdio::null()).output()?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr).trim());
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    // the new device dir is the LAST line: device-a64.py's helpers (device-repath.py: "relinked ...", "rewrote ...")
+    // print to the same stdout. Taking all of it as the path made boot-a64.sh create a tree named after that report
+    // in the repo root.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let dev = PathBuf::from(text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or(""));
+    let var = repo_root().join("var");
+    anyhow::ensure!(
+        dev.is_absolute() && dev.parent().and_then(|p| p.canonicalize().ok()) == var.canonicalize().ok() && dev.join("sim.env").is_file(),
+        "device create did not name a new device dir under {} (got {:?})",
+        var.display(),
+        dev
+    );
+    Ok(dev)
 }
 
 /// The device the arm64 sim was last booted with (boot-a64.sh writes var/run-a64/device)

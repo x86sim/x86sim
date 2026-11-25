@@ -31,7 +31,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <libkern/OSCacheControl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <xpc/xpc.h>
 
@@ -1139,3 +1141,80 @@ __attribute__((constructor)) static void shim_app_stderr_init(void)
 	shim_quiet_os_log();
 }
 
+
+// x86Sim (agents): host/simax, the accessibility reader agents read the screen through (x86sim snapshot, the MCP
+// server's snapshot / tap tools), runs in every process with UIKit: apps, SpringBoard, view services. It links UIKit
+// and WebKit, so it is not inserted everywhere: processes that have UIKitCore at launch dlopen it here
+// (X86SIM_AX_DYLIB, set by mksimdevice.py; X86SIM_AX_OFF=1 turns it off).
+__attribute__((constructor)) static void shim_ax_init(void)
+{
+	const char* ax = getenv("X86SIM_AX_DYLIB");
+	if (!ax || !*ax || getenv("X86SIM_AX_OFF"))
+		return;
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		const char* n = _dyld_get_image_name(i);
+		size_t l = n ? strlen(n) : 0;
+		if (l >= 10 && !strcmp(n + l - 10, "/UIKitCore")) {
+			if (!dlopen(ax, RTLD_NOW | RTLD_LOCAL)) {
+				char b[512]; int k = snprintf(b, sizeof b, "simshim: simax: %s\n", dlerror() ?: "dlopen failed"); write(2, b, k);
+			}
+			return;
+		}
+	}
+}
+
+// x86Sim (Web Inspector): webinspectord's debugger socket. The job (com.apple.webinspectord) declares a launchd socket
+// (SecureSocketWithKey RWI_LISTEN_SOCKET, the socket Safari's Develop menu connects to on a Mac). launchd_sim binds it in
+// a mkdtemp directory of the device's /private/var/tmp, which on the host is longer than a sun_path: Darling truncates it
+// (com.apple.launchd.XXXXXXXXXX/com.apple.t, the same for every such socket of a job), and launchd_sim refuses
+// SockPathName. mksimdevice.py drops the Sockets entry and sets X86SIM_RWI_SOCKET, a short path in the host's
+// /run/user/<uid> (/Volumes/SystemRoot/run/user/... inside), and this binds the listener there instead of asking launchd:
+// -[_RWITCPServer _listenOnLaunchdProvidedSocket:] is launch_activate_socket(name), the first fd into _listenSocket,
+// then _createListenDispatchSource (WebInspector.framework, iOS 27.2). The launcher's RWI client
+// (tools/launcher/core/src/rwi.rs) connects to it from the host.
+static BOOL (*shim_rwi_listen_orig)(id, SEL, const char*);
+static BOOL shim_rwi_listen(id self, SEL sel, const char* name)
+{
+	const char* path = getenv("X86SIM_RWI_SOCKET");
+	Ivar iv = class_getInstanceVariable(object_getClass(self), "_listenSocket");
+	if (!path || !*path || !iv || strlen(path) >= sizeof(((struct sockaddr_un*) 0)->sun_path))
+		return shim_rwi_listen_orig(self, sel, name);
+	char b[300];
+	int s = socket(AF_UNIX, SOCK_STREAM, 0), k;
+	struct sockaddr_un a;
+	memset(&a, 0, sizeof a);
+	a.sun_family = AF_UNIX;
+	strlcpy(a.sun_path, path, sizeof a.sun_path);
+	unlink(path);
+	if (s < 0 || bind(s, (struct sockaddr*) &a, sizeof a) < 0 || listen(s, 16) < 0) {
+		k = snprintf(b, sizeof b, "simshim: webinspectord socket %s: %s\n", path, strerror(errno));
+		write(2, b, k);
+		if (s >= 0)
+			close(s);
+		return NO;
+	}
+	chmod(path, 0600);
+	fcntl(s, F_SETFD, FD_CLOEXEC);
+	*(int*) ((char*) (void*) self + ivar_getOffset(iv)) = s;
+	k = snprintf(b, sizeof b, "simshim: webinspectord listens on %s (for %s)\n", path, name ? name : "?");
+	write(2, b, k);
+	return ((BOOL (*)(id, SEL)) objc_msgSend)(self, sel_registerName("_createListenDispatchSource"));
+}
+static void shim_rwi_added(const struct mach_header* mh, intptr_t slide)
+{
+	static bool done;
+	if (done)
+		return;
+	Class c = objc_getClass("_RWITCPServer");
+	Method m = c ? class_getInstanceMethod(c, sel_registerName("_listenOnLaunchdProvidedSocket:")) : NULL;
+	if (!m)
+		return;
+	done = true;
+	shim_rwi_listen_orig = (BOOL (*)(id, SEL, const char*)) method_setImplementation(m, (IMP) shim_rwi_listen);
+	write(2, "simshim: hooked _RWITCPServer _listenOnLaunchdProvidedSocket:\n", 62);
+}
+__attribute__((constructor)) static void shim_rwi_init(void)
+{
+	if (getenv("X86SIM_RWI_SOCKET"))
+		_dyld_register_func_for_add_image(shim_rwi_added);
+}

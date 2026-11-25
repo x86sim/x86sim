@@ -3,11 +3,12 @@
 # the launcher (systemd-run units, or detached processes without systemd), so the payload is copied once per version into the data dir and everything runs
 # from there:
 #   $XDG_DATA_HOME/x86sim (default ~/.local/share/x86sim): X86SIM_ROOT, laid out like the repo checkout:
-#     cli host linux tools tests -> app/<version>/...   (relative links: they resolve inside Darling's view too)
+#     cli host linux tools tests external -> app/<version>/...   (relative links: they resolve inside Darling's view too;
+#                                                         external: omarchy-apple-dev, for `x86sim dev`)
 #     darling-prefix -> /opt/x86sim/darling             (installed by the setup wizard's privileged step)
 #     runtimes/  var/  x86sim.env                        (user data, kept across versions)
 #   $XDG_CACHE_HOME/x86sim (default ~/.cache/x86sim): X86SIM_SCRATCH (AOT images, logs, per-boot Darling prefixes)
-# Usage: x86sim.AppImage [launcher|aot|mcp|x86sim|shell|setup-helper|version] [args]
+# Usage: x86sim.AppImage [launcher|aot|mcp|dev|serve|x86sim|shell|setup-helper|version] [args]
 set -e
 HERE=$(dirname "$(readlink -f "$0")")
 S=$HERE/usr/share/x86sim
@@ -37,13 +38,15 @@ if [ ! -f "$APP/.complete" ] || [ -n "${X86SIM_REFRESH_PAYLOAD:-}" ]; then
 	mkdir -p "$APP.tmp"
 	cp -a "$S/payload/." "$APP.tmp/"
 	cp -a "$S/bin" "$S/pylib" "$S/licenses" "$S/VERSION" "$S/DARLING_ID" "$S/install-helper.sh" "$APP.tmp/"
+	# x86sim inspect's frontend (share/inspect.rs finds it at <app>/webinspector)
+	[ ! -d "$S/webinspector" ] || cp -a "$S/webinspector" "$APP.tmp/"
 	touch "$APP.tmp/.complete"
 	rm -rf "$APP"
 	mv "$APP.tmp" "$APP"
 	# keep this version and the one before (by modification time)
 	ls -1dt "$DATA"/app/*/ 2>/dev/null | tail -n +3 | while read -r d; do rm -rf "$d"; done
 fi
-for d in cli host linux tools tests; do
+for d in cli host linux tools tests external; do
 	[ -e "$APP/$d" ] || continue
 	if [ -L "$DATA/$d" ] || [ ! -e "$DATA/$d" ]; then ln -sfn "app/$VER/$d" "$DATA/$d"; fi
 done
@@ -96,6 +99,8 @@ case "$cmd" in
 launcher) [ $# -gt 0 ] && shift; exec "$B/x86sim-launcher" "$@" ;;
 aot) shift; exec "$B/x86sim-aot" "$@" ;;
 mcp) shift; exec "$B/x86sim-mcp" "$@" ;;
+dev) shift; exec "$B/x86sim-dev" "$@" ;;
+serve) shift; exec "$B/x86sim-serve" "$@" ;;
 x86sim) shift; exec "$APP/cli/x86sim" "$@" ;;
 shell) shift; cd "$DATA"; exec "${SHELL:-/bin/sh}" "$@" ;;
 version) echo "x86Sim $VER (Darling $X86SIM_DARLING_ID, $mode mode)"; echo "data $DATA"; echo "cache $CACHE" ;;

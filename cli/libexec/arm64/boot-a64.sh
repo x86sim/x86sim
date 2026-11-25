@@ -19,6 +19,11 @@ export X86SIM_ARCH=arm64
 # aborted launchd_sim ("missing or invalid configuration plist", brk in launchd_sim) at every boot.
 A64_DEVICE=$(realpath -m "${A64_DEVICE:-$X86SIM_ROOT/var/device-a64}")
 export A64_DEVICE X86SIM_DEVICE=$A64_DEVICE
+# erase / clone (devctl.py) hold <phone>/.lifecycle.lock while they work: no boot of a phone being erased. Checked after
+# this process exists with A64_DEVICE, as they look for it after taking the lock (whichever comes second sees the other).
+if [ -d "$A64_DEVICE" ] && ! flock -n "$A64_DEVICE/.lifecycle.lock" true 2>/dev/null; then
+	echo "boot-a64: $A64_DEVICE is being erased or cloned" >&2; exit 1
+fi
 # Speed 24: a device's iOS version is its <device>/runtime (a runtimes/ dir name, device-a64.py create --ios); A64_RUNTIME
 # overrides. Each runtime has its own JIT/AOT cache dir ($X86SIM_SCRATCH/jc-<build>; 27.0: jitcache) and placement table.
 A64_RT_DIR=$(cat "$X86SIM_DEVICE/runtime" 2>/dev/null)
@@ -534,7 +539,8 @@ if [ "$A64_PLATFORM" != ios ]; then
 	left=
 	for j in $JOBS; do
 		case $j in *=*) continue ;; esac
-		[ -f "$X86SIM_RUNTIME/System/Library/LaunchDaemons/$j.plist" ] || [ -f "$X86SIM_RUNTIME/System/Library/LaunchAngels/$j.plist" ] && continue
+		[ -f "$X86SIM_RUNTIME/System/Library/LaunchDaemons/$j.plist" ] || [ -f "$X86SIM_RUNTIME/System/Library/LaunchAngels/$j.plist" ] ||
+			[ -f "$X86SIM_RUNTIME/Developer/Library/LaunchDaemons/$j.plist" ] && continue
 		drop_job "$j"; left="$left $j"
 	done
 	[ -n "$left" ] && echo "  not in this $A64_PLATFORM runtime:$left"
@@ -750,7 +756,7 @@ stop_helpers() {
 	pkill -f "mdnsresponder.py .*/$(basename "$ST")/mDNSResponder\$" 2>/dev/null
 	rm -f "$ST/mdns.pid" "$ST/mDNSResponder"
 	[ -f "$ST/simaudio.pid" ] && kill "$(cat "$ST/simaudio.pid")" 2>/dev/null
-	rm -f "$ST/simaudio.pid"
+	rm -f "$ST/simaudio.pid" "$ST/simaudio-tap.sock"
 	[ -f "$ST/fmrelay.pid" ] && kill "$(cat "$ST/fmrelay.pid")" 2>/dev/null
 	rm -f "$ST/fmrelay.pid"
 }
@@ -893,11 +899,12 @@ done
 # Speed 27: the audio devices (what a Mac's CoreSimulator/coreaudiod provide): host/simaudio/arm64/libsimaudio.dylib in
 # each process (mksimdevice, X86SIM_AUDIO) streams PCM to cli/libexec/simaudio.py (PipeWire). Without an input device
 # Siri's recording failed at once (corespeechd: "siriInputSource 'sino'. No Input available", AudioQueue -66680 finding
-# Default-InputOutput, prepareRecordForStream -11790) and Siri never got further.
-if [ "${X86SIM_AUDIO:-0}" != 0 ]; then
+# Default-InputOutput, prepareRecordForStream -11790) and Siri never got further. simaudio.py runs on every boot: its
+# tap (simaudio-tap.sock) lets x86sim serve play the phone in a browser; X86SIM_AUDIO=1 also plays it on PipeWire and
+# records the host's microphone (else input streams get silence, or a browser's microphone through the tap).
+X86SIM_AUDIO_PLAYBACK=$([ "${X86SIM_AUDIO:-0}" != 0 ] && echo 1 || echo 0) \
 	setsid python3 "$X/cli/libexec/simaudio.py" "$ST/simaudio.sock" > "$ST/simaudio.log" 2>&1 < /dev/null &
-	echo $! > "$ST/simaudio.pid"
-fi
+echo $! > "$ST/simaudio.pid"
 if [ "${X86SIM_JETSAM:-1}" != 0 ]; then
 	setsid python3 "$X/cli/libexec/jetsam.py" > "$ST/jetsam.log" 2>&1 < /dev/null &
 	echo $! > "$ST/jetsam.pid"
@@ -907,6 +914,8 @@ sleep 1
 # Host zone name (no darling yet). The TZ link itself must run *inside* limited.sh so it does not birth
 # darlingserver in the caller's cgroup (that was the Stage 2/3 escape: only timeout+darling stayed under MemoryMax).
 TZNAME=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's#^.*/zoneinfo/##p')
+# the phone's own time zone (x86sim timezone ZONE: <device>/timezone), else the host's (as a Mac's simulator)
+if [ -s "$D/timezone" ] && [ -e "/usr/share/zoneinfo/$(cat "$D/timezone")" ]; then TZNAME=$(cat "$D/timezone"); fi
 H="/Volumes/SystemRoot$X/host/simhost/simhost"
 
 # Payload for `darling shell sh -c` — raw text so $ENVS quote tokens are only parsed by that inner sh.

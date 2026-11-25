@@ -78,17 +78,14 @@ required parts.
 
 ## Backlog (not started or unfinished)
 
-- Home indicator gestures: a swipe up from the bottom edge doesn't go home or open the app switcher. Check that
-  simview/simhid send edge-swipe touches the way SpringBoard's system gesture recognizers expect (edge/region flags,
-  digitizer surface events).
 - Apple's simulator MCP server: research what Apple ships (which tool, the transport, and which simctl/CoreSimulator calls
-  it makes) and make it work against x86sim. If it needs macOS, provide a compatible MCP server on Linux backed by x86sim
-  (boot, install, launch, screenshot, tap/type, logs).
+  it makes) and whether its tool names and arguments should be mirrored. x86Sim's own MCP server (x86sim-mcp) already
+  covers boot, install, launch, screenshot, the screen as text, tap/type and logs.
 - Scroll wheel in simview: wheel and touchpad scroll events should scroll the content (as on a Mac simulator:
   scroll events or a synthesized two-finger pan), not be ignored.
 
 - Audio: host/simaudio (in-process HAL stand-in, in every process: silent devices by default) +
-  cli/libexec/simaudio.py (PipeWire), heard on the host with `X86SIM_AUDIO=1`. A faithful version would
+  cli/libexec/simaudio.py (PipeWire), heard on the host with `X86SIM_AUDIO=1` and in `x86sim serve`'s page. A faithful version would
   answer coreaudiod's MIG protocol on `com.apple.audio.audiohald`.
-- Clipboard sync (`x86sim pbcopy/pbpaste`, Linux clipboard <-> pasted), rotation (`x86sim rotate`), software
-  keyboard toggle: not started.
+- Software keyboard toggle (Apple's Cmd-K): not started. (Clipboard sync is `x86sim pbcopy|pbpaste --host` and
+  `pbsync`; rotation is `x86sim rotate`; the home swipe from the bottom edge goes home: `x86sim swipe home`.)

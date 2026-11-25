@@ -1,0 +1,40 @@
+/* the Accessibility Inspector (axinspect.js) */
+.side.ax-wide { width: 360px; }
+.axlayer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; border-radius: 18px; }
+.axlayer[hidden] { display: none; }
+.axlayer.live { pointer-events: auto; cursor: crosshair; }
+.axbox { position: absolute; box-sizing: border-box; border: 2px solid; border-radius: 3px; pointer-events: none; }
+.axbox span { position: absolute; left: -2px; bottom: 100%; font: 11px/1.3 system-ui, sans-serif; color: #fff; padding: 1px 5px; border-radius: 3px 3px 3px 0; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.axbox.all { border-width: 1px; border-color: rgba(76, 141, 255, .55); }
+.axbox.hover { border-color: #4c8dff; background: rgba(76, 141, 255, .15); }
+.axbox.hover span { background: #4c8dff; }
+.axbox.sel { border-color: #ff9f0a; background: rgba(255, 159, 10, .18); }
+.axbox.sel span { background: #ff9f0a; color: #000; }
+.axbox.mark.error { border-color: var(--bad); background: rgba(224, 86, 91, .2); }
+.axbox.mark.warning { border-color: var(--warn); background: rgba(224, 164, 58, .2); }
+.axbox.mark.info { border-color: var(--muted); }
+.axbox.mark span { background: #000c; }
+.axpanel { display: flex; flex-direction: column; gap: 8px; }
+.axopts { display: flex; gap: 12px; font-size: 12px; color: var(--muted); }
+.axopts label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+.axstatus { font-size: 12px; color: var(--muted); word-break: break-word; }
+.axtitle { font-size: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.axtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.axtable th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 8px 3px 0; vertical-align: top; white-space: nowrap; }
+.axtable td { padding: 3px 0; word-break: break-word; }
+.axtable tr + tr { border-top: 1px solid var(--border); }
+.axaudit { display: flex; flex-direction: column; gap: 6px; }
+.axsum { font-size: 12px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.axfind { font-size: 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px; padding: 6px 8px; cursor: pointer; display: flex; flex-direction: column; gap: 3px; }
+.axfind:hover { background: var(--raised); }
+.axfind.error { border-left-color: var(--bad); }
+.axfind.warning { border-left-color: var(--warn); }
+.axfind.info { border-left-color: var(--muted); }
+.axfind .sev { font-weight: 600; }
+.axfind.error .sev { color: var(--bad); }
+.axfind.warning .sev { color: var(--warn); }
+.axfind .fix { color: var(--muted); }
+.axlist { max-height: 300px; overflow: auto; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.axrow { padding: 3px 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.axrow:hover, .axrow.on { background: var(--raised); }
+@media (max-width: 760px) { .side.ax-wide { width: auto; } }

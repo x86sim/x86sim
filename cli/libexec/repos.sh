@@ -9,6 +9,9 @@
 #                                    --apply rebases clean trees and pushes with --force-with-lease; a conflicting
 #                                    rebase is aborted and reported. Forks without an x86sim branch get GitHub's
 #                                    "Sync fork" (merge-upstream) on their default branch.
+#                                    A top-level submodule may name another branch (.gitmodules branch = main) and
+#                                    sync = merge: upstream is then merged into that branch (a fork whose history
+#                                    already has merges, e.g. external/omarchy-apple-dev) and pushed without force.
 # Untracked files are never added; they are listed so they can be added (or ignored) by hand.
 set -u
 X=${X86SIM_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}
@@ -16,6 +19,14 @@ cd "$X" || exit 1
 
 # submodule paths, deepest first (reverse of foreach's pre-order: children come after their parents)
 subs() { git submodule foreach --recursive -q 'echo "$displaypath"' | tac; }
+
+# a top-level submodule's .gitmodules setting (KEY: branch, sync); nested submodules have none
+modcfg() {
+	local name
+	name=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null \
+		| awk -v p="$1" '$2 == p { n = $1; sub(/^submodule\./, "", n); sub(/\.path$/, "", n); print n }')
+	[ -n "$name" ] && git config -f .gitmodules "submodule.$name.$2"
+}
 
 dirty() { [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; }
 unpushed() {
@@ -69,7 +80,7 @@ cmd_commit() {
 }
 
 cmd_sync() {
-	local apply=0 p url name parent pb behind ahead
+	local apply=0 p url name parent pb behind ahead br style
 	local -a only=()
 	while [ $# -gt 0 ]; do
 		case $1 in --apply) apply=1 ;; *) only+=("$1") ;; esac
@@ -81,9 +92,11 @@ cmd_sync() {
 		name=$(basename "$url" .git)
 		parent=$(gh api "repos/x86sim/$name" --jq '.parent.full_name // empty' 2>/dev/null)
 		[ -n "$parent" ] || { echo "$p: x86sim/$name has no GitHub parent; skipped"; continue; }
-		if ! git -C "$p" show-ref -q --verify refs/heads/x86sim && \
-		   ! git -C "$p" ls-remote -q --exit-code origin refs/heads/x86sim >/dev/null; then
-			# unchanged fork: keep its default branch in sync on GitHub (the pinned commit is darling's choice)
+		br=$(modcfg "$p" branch) || br=x86sim
+		style=$(modcfg "$p" sync) || style=rebase
+		if ! git -C "$p" show-ref -q --verify refs/heads/$br && \
+		   ! git -C "$p" ls-remote -q --exit-code origin refs/heads/$br >/dev/null; then
+			# unchanged fork (no $br branch): keep its default branch in sync on GitHub (the pinned commit is darling's choice)
 			if [ $apply = 1 ]; then
 				pb=$(gh api "repos/x86sim/$name" --jq .default_branch)
 				gh api -X POST "repos/x86sim/$name/merge-upstream" -f branch="$pb" --jq "\"$p: \(.message)\"" 2>/dev/null \
@@ -93,25 +106,35 @@ cmd_sync() {
 		fi
 		pb=$(gh api "repos/$parent" --jq .default_branch)
 		git -C "$p" remote get-url upstream >/dev/null 2>&1 || git -C "$p" remote add upstream "https://github.com/$parent.git"
-		git -C "$p" fetch -q upstream "$pb" && git -C "$p" fetch -q origin x86sim || { echo "$p: fetch failed"; continue; }
-		behind=$(git -C "$p" rev-list --count "origin/x86sim..upstream/$pb")
-		ahead=$(git -C "$p" rev-list --count "upstream/$pb..origin/x86sim")
+		git -C "$p" fetch -q upstream "$pb" && git -C "$p" fetch -q origin "$br" || { echo "$p: fetch failed"; continue; }
+		behind=$(git -C "$p" rev-list --count "origin/$br..upstream/$pb")
+		ahead=$(git -C "$p" rev-list --count "upstream/$pb..origin/$br")
 		if [ "$behind" = 0 ]; then echo "$p: up to date with $parent:$pb ($ahead ours)"; continue; fi
 		if [ $apply = 0 ]; then
-			if git -C "$p" merge-tree --write-tree "origin/x86sim" "upstream/$pb" >/dev/null 2>&1; then
+			if git -C "$p" merge-tree --write-tree "origin/$br" "upstream/$pb" >/dev/null 2>&1; then
 				echo "$p: $behind behind $parent:$pb, $ahead ours, merges cleanly"
 			else
 				echo "$p: $behind behind $parent:$pb, $ahead ours, CONFLICTS:"
-				git -C "$p" merge-tree --write-tree --name-only "origin/x86sim" "upstream/$pb" 2>/dev/null | sed -n '2,/^$/{/^$/!s/^/    /p}'
+				git -C "$p" merge-tree --write-tree --name-only "origin/$br" "upstream/$pb" 2>/dev/null | sed -n '2,/^$/{/^$/!s/^/    /p}'
 			fi
 			continue
 		fi
-		if [ "$(git -C "$p" symbolic-ref -q --short HEAD)" != x86sim ] || dirty "$p"; then
-			echo "$p: not on a clean x86sim branch; skipped"; continue
+		if [ "$(git -C "$p" symbolic-ref -q --short HEAD)" != "$br" ] || dirty "$p"; then
+			echo "$p: not on a clean $br branch; skipped"; continue
 		fi
-		git -C "$p" merge -q --ff-only origin/x86sim 2>/dev/null
+		git -C "$p" merge -q --ff-only "origin/$br" 2>/dev/null
+		if [ "$style" = merge ]; then
+			if git -C "$p" merge -q --no-edit -m "Merge $parent:$pb" "upstream/$pb" >/dev/null 2>&1; then
+				git -C "$p" push -q origin "$br" && echo "$p: merged $parent:$pb (+$behind) and pushed"
+			else
+				echo "$p: merge of $parent:$pb CONFLICTS (aborted):"
+				git -C "$p" diff --name-only --diff-filter=U | sed 's/^/    /'
+				git -C "$p" merge --abort
+			fi
+			continue
+		fi
 		if git -C "$p" rebase -q "upstream/$pb" >/dev/null 2>&1; then
-			git -C "$p" push -q --force-with-lease=x86sim origin x86sim && echo "$p: rebased onto $parent:$pb (+$behind) and pushed"
+			git -C "$p" push -q --force-with-lease="$br" origin "$br" && echo "$p: rebased onto $parent:$pb (+$behind) and pushed"
 		else
 			echo "$p: rebase onto $parent:$pb CONFLICTS (aborted):"
 			git -C "$p" diff --name-only --diff-filter=U | sed 's/^/    /'

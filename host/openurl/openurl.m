@@ -200,24 +200,57 @@ static NSDictionary* rbsTerminate(NSString* bid) {
 	return ok ? @{ @"ok": @YES } : @{ @"ok": @NO, @"error": err ? err.description : @"RBSTerminateRequest failed" };
 }
 
+// a process of the app is running (RunningBoard's view: what FrontBoard and simctl terminate act on)
+static BOOL appRunning(NSString* bid) {
+	dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+	id pred = MSG(id, id, SEL, id)(NSClassFromString(@"RBSProcessPredicate"), sel_getUid("predicateMatchingBundleIdentifier:"), bid);
+	NSError* err = nil;
+	id h = pred ? MSG(id, id, SEL, id, NSError* __autoreleasing*)(NSClassFromString(@"RBSProcessHandle"), sel_getUid("handleForPredicate:error:"), pred, &err) : nil;
+	return h != nil;
+}
+
+// simctl terminate. FrontBoard (FBSSystemService) ends the app, as CoreSimulatorBridge asks it; its completion often
+// came only after its 5 s wait here (or never: visionOS's SurfBoard looks the caller up as an app, "Failed to find
+// bundle record for com.x86sim.openurl"), so every terminate took ~6 s. The answer is given as soon as RunningBoard
+// no longer has the process (polled every 20 ms), and RunningBoard terminates it directly
+// (com.apple.runningboard.terminateprocess) when FrontBoard has not within 1.5 s.
 static NSDictionary* terminateApp(NSString* bid) {
+	if (!appRunning(bid)) return @{ @"ok": @NO, @"error": @"not running" };
 	dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
 	id svc = MSG(id, id, SEL)(NSClassFromString(@"FBSSystemService"), sel_getUid("sharedService"));
-	dispatch_semaphore_t done = dispatch_semaphore_create(0);
-	__block NSDictionary* r = @{ @"ok": @NO, @"error": @"no answer in 15 s" };
+	__block volatile int answered = 0;
+	__block BOOL fbsOk = NO;
 	void (^completion)(BOOL) = ^(BOOL ok) {
-		// FBSSystemService answers NO without an error when the app isn't running (CoreSimulatorBridge's message)
-		r = ok ? @{ @"ok": @YES } : @{ @"ok": @NO, @"error": @"not running or termination failed" };
-		dispatch_semaphore_signal(done);
+		fbsOk = ok;
+		answered = 1;
 	};
 	// reason 5 = FBSTerminationReasonUserInitiated? the Bridge passes its own; any reason terminates
 	MSG(void, id, SEL, id, long, BOOL, id, id)(svc, sel_getUid("terminateApplication:forReason:andReport:withDescription:completion:"),
 		bid, 5, NO, @"Termination requested by simulator host", completion);
-	// Platforms 2: visionOS's SurfBoard (SFBSystemService) looks the caller up as an app ("Failed to find bundle record
-	// for com.x86sim.openurl") and then never calls the completion. RunningBoard terminates the app directly then
-	// (com.apple.runningboard.terminateprocess).
-	if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) r = rbsTerminate(bid);
-	return r;
+	uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+	BOOL rbsTried = NO;
+	for (;;) {
+		usleep(20000);
+		uint64_t ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1000000;
+		if (!appRunning(bid)) {
+			fprintf(logf_, "terminate %s: gone after %llu ms (%s)\n", bid.UTF8String, (unsigned long long)ms,
+				rbsTried ? "RunningBoard" : answered ? "FrontBoard answered" : "FrontBoard");
+			fflush(logf_);
+			return @{ @"ok": @YES };
+		}
+		if (answered && !fbsOk && !rbsTried) {
+			// FrontBoard declined (CoreSimulatorBridge's "not running or termination failed")
+			rbsTried = YES;
+			NSDictionary* r = rbsTerminate(bid);
+			if (![r[@"ok"] boolValue]) return r;
+		}
+		if (ms >= 1500 && !rbsTried) {
+			rbsTried = YES;
+			NSDictionary* r = rbsTerminate(bid);
+			if (![r[@"ok"] boolValue]) return r;
+		}
+		if (ms >= 15000) return @{ @"ok": @NO, @"error": @"still running after 15 s" };
+	}
 }
 
 static NSDictionary* launchApp(NSDictionary* q) {
@@ -452,6 +485,9 @@ static NSDictionary* addMedia(NSArray* paths) {
 	return @{ @"ok": @YES, @"added": @(paths.count) };
 }
 
+// x86Sim: simctl ui / status_bar / pbcopy / pbpaste / keychain, language (cli/libexec/devctl.py)
+#include "devctl.m"
+
 static void request(NSString* rest) {
 	NSRange sp = [rest rangeOfString:@" "];
 	if (sp.location == NSNotFound) return;
@@ -471,6 +507,7 @@ static void request(NSString* rest) {
 	else if ([c isEqual:@"xpcping"]) r = xpcPing(q[@"service"]);
 	else if ([c isEqual:@"addmedia"]) r = addMedia(q[@"paths"]);
 	else if ([c isEqual:@"spawn"]) r = spawnProgram(q);
+	else if ((r = devctlRequest(c, q))) {}
 	else r = @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"unknown cmd %@", c] };
 	answer(rid, r);
 }

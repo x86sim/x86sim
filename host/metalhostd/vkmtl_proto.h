@@ -27,7 +27,7 @@ enum {
 	VKMTL_BUF_NEW = 2,
 	// {u64 id}  (any object)
 	VKMTL_OBJ_DEL = 3,
-	// {u64 id, vkmtl_texdesc} -> {i32 status, u32 pad, u64 allocatedSize}
+	// {u64 id, vkmtl_texdesc} -> {i32 status, u32 pad, u64 gpuResourceID (the runtime's)}
 	VKMTL_TEX_NEW = 4,
 	// {u64 id, vkmtl_region, u32 level, u32 slice, u64 bytesPerRow, u64 bytesPerImage, u64 dataLen, data}
 	VKMTL_TEX_REPLACE = 5,
@@ -69,7 +69,7 @@ enum {
 	// {u64 id, u64 buffer, vkmtl_texdesc, u64 offset, u64 bytesPerRow, u32 iosurface, u32 planar} -> as TEX_NEW
 	VKMTL_TEX_NEW_BUF = 21,
 	// x86Sim: a texture view: {u64 id, u64 parent, u32 pixelFormat, u32 textureType, u64 levelStart, u64 levelCount,
-	//  u64 sliceStart, u64 sliceCount, u32 hasSwizzle, u32 swizzle (r,g,b,a bytes)} -> {i32 status, u32 pad, u64 0}
+	//  u64 sliceStart, u64 sliceCount, u32 hasSwizzle, u32 swizzle (r,g,b,a bytes)} -> as TEX_NEW
 	VKMTL_TEX_VIEW = 22,
 
 	// async from mtlvk: {u64 cb, u32 status (MTLCommandBufferStatus), u32 error (MTLCommandBufferError),

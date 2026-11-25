@@ -156,6 +156,23 @@ impl Hid {
         self.send(&format!("key {} {usage}", if down { "down" } else { "up" }));
     }
 
+    /// Keyboard: Apple's Toggle Software Keyboard (Cmd-K): the on-screen keyboard key (Consumer 0x1ae) on the keyboard
+    pub fn soft_keyboard_toggle(&mut self) {
+        self.send("key down 0x1ae 0x0c");
+        self.send("key up 0x1ae 0x0c");
+    }
+
+    /// Keyboard: Apple's Connect Hardware Keyboard (Shift-Cmd-K): host/simhid's hwkb (GraphicsServices' attached state)
+    pub fn hw_keyboard(&mut self, on: bool) {
+        self.send(if on { "hwkb connect" } else { "hwkb disconnect" });
+    }
+
+    /// The hardware keyboard's connection as host/simhid remembers it (<data>/hwkeyboard next to the socket)
+    pub fn hw_keyboard_connected(&self) -> bool {
+        let f = self.path.parent().map(|d| d.join("hwkeyboard")).unwrap_or_default();
+        !std::fs::read_to_string(f).is_ok_and(|s| s.trim() == "disconnected")
+    }
+
     /// Platforms 1: any page / usage on the buttons service (host/simhid "usage"), for buttons simhid has no name for
     pub fn usage(&mut self, page: u32, usage: u32, down: bool) {
         self.send(&format!("usage {page:#x} {usage:#x} {}", if down { "down" } else { "up" }));

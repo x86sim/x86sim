@@ -23,7 +23,11 @@ final class Audio: ObservableObject {
 	func session() {
 		let s = AVAudioSession.sharedInstance()
 		do {
+			#if os(tvOS) || os(watchOS)
+			try s.setCategory(.playAndRecord, mode: .default)  // no .defaultToSpeaker there (one route)
+			#else
 			try s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+			#endif
 			try s.setActive(true)
 			say("session active: \(s.sampleRate) Hz, out \(s.outputNumberOfChannels) ch, route \(s.currentRoute.outputs.map { $0.portName })")
 		} catch { say("session error: \(error)") }

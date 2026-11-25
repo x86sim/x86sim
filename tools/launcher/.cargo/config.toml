@@ -1,0 +1,7 @@
+# x86Sim: build environment for the launcher crates (build/release/build.sh builds from here too)
+[env]
+# audiopus_sys (x86sim-serve's Opus encoder): build its bundled libopus and link it statically, never the host's
+# (the AppImage must not need a libopus.so); that libopus's CMakeLists asks for CMake 3.1, which CMake 4 refuses
+# without a policy floor
+OPUS_NO_PKG = "1"
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

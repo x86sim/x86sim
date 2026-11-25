@@ -1,5 +1,5 @@
 //! Phones: a grid of cards for phones that can start (live screen, state, memory/CPU, Start/Stop), and a compact list of
-//! phones waiting for an iOS version, grouped by version with one Download each. "Add phone" dialog.
+//! phones waiting for an iOS version, grouped by version with one Download each. "Add device" dialog.
 use crate::theme::*;
 use crate::{viewer, AddDialog, App, View};
 use eframe::egui;
@@ -99,6 +99,9 @@ impl App {
                 ui.add_space(gap);
             }
         }
+
+        // phones kept booted for agents (x86sim pool), when a pool exists (pool.rs)
+        self.pool_section(ui);
 
         // phones whose iOS isn't installed: one compact group per version
         let mut groups: Vec<(String, String, Vec<String>)> = vec![]; // (ios, build, ids)

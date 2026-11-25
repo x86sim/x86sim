@@ -386,6 +386,86 @@ static void h_helper_vlog(GuestThread &t, u32) {
     if (write(2, s.data(), s.size()) < 0) {}
 }
 static u64 g_all_image_infos[512];
+static u64 g_main_mh;
+static u64 g_dyld_mh;
+static std::string g_dyld_path;  // dyld_sim's file (x86sim profile: not in its own image list)
+// dyld_all_image_infos.notification for lldb (it breaks there to learn of image list changes, and only at an address
+// inside a module it knows): a "ret" in dyld_sim's header padding, supplied by the code fetch (gdbstub.cpp), never in
+// memory. h_helper_image_list_changes calls it as dyld calls notification(mode, count, dyld_image_info[]).
+static u64 g_dbg_notifier;
+static u64 dyld_notifier_address(u64 mh) {
+    const uint32_t *h = (const uint32_t *)mh;
+    if (!mh || h[0] != 0xfeedfacf) return 0;
+    const u64 a = mh + ((32 + h[5] + 15) & ~15ull);  // after the load commands
+    return *(const uint32_t *)a == 0 && *(const uint32_t *)(a + 4) == 0 ? a : 0;  // padding before __text
+}
+static std::string g_main_path;  // the main executable's Darwin path
+// qShlibInfoAddr (gdbstub.cpp): a copy of dyld_sim's dyld_all_image_infos as lldb's dynamic loader needs it. On a Mac
+// the host dyld owns the struct: its infoArray starts with the main executable, and notification, dyldImageLoadAddress
+// and dyldAllImageInfosAddress (the struct's own address) are set. dyld_sim's has none of them (libarm64jit maps the
+// main executable). Rebuilt on every request (lldb asks again at every image list change).
+static u64 g_dbg_infos[512];
+static u64 g_dbg_array[3 * 8192];
+u64 a64_all_image_infos() {
+    u64 *src = g_all_image_infos;
+    memcpy(g_dbg_infos, src, sizeof g_dbg_infos);
+    const uint32_t n = (uint32_t)(src[0] >> 32);
+    const u64 arr = src[1];
+    uint32_t k = 0;
+    if (g_main_mh) { g_dbg_array[0] = g_main_mh; g_dbg_array[1] = (u64)g_main_path.c_str(); g_dbg_array[2] = 0; k = 1; }
+    for (uint32_t i = 0; arr && i < n && k < 8192; i++) {
+        u64 e[3];
+        iovec l{e, sizeof e}, r{(void *)(arr + 24 * i), sizeof e};
+        if (process_vm_readv(getpid(), &l, 1, &r, 1, 0) != (ssize_t)sizeof e) break;
+        if (e[0] == g_main_mh) continue;
+        memcpy(&g_dbg_array[3 * k++], e, sizeof e);
+    }
+    u64 *p = g_dbg_infos;
+    p[0] = (u64)((uint32_t)src[0] ? (uint32_t)src[0] : 17) | (u64)k << 32;
+    p[1] = (u64)g_dbg_array;
+    p[2] = g_dbg_notifier;
+    if (!p[4]) p[4] = g_dyld_mh;
+    p[13] = (u64)p;  // dyldAllImageInfosAddress: else lldb "relocates" dyld by the difference
+    return (u64)p;
+}
+u64 a64_main_header() { return g_main_mh; }
+// x86sim profile (prof.cpp): the loaded images (mach header, Darwin path), the main executable first
+void a64_image_list(std::vector<std::pair<u64, std::string>> &out) {
+    auto rd = [](u64 a, void *to, size_t n) {
+        iovec l{to, n}, r{(void *)a, n};
+        return process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n;
+    };
+    if (g_main_mh) out.push_back({g_main_mh, g_main_path});
+    if (g_dyld_mh && !g_dyld_path.empty()) out.push_back({g_dyld_mh, g_dyld_path});
+    const uint32_t n = (uint32_t)(g_all_image_infos[0] >> 32);
+    const u64 arr = g_all_image_infos[1];
+    for (uint32_t i = 0; arr && i < n && i < 65536; i++) {
+        u64 e[3];
+        if (!rd(arr + 24 * i, e, sizeof e)) break;
+        if (e[0] == g_main_mh || !e[1]) continue;
+        char p[1024];
+        size_t k = 0;
+        for (; k + 64 <= sizeof p; k += 64) {  // a path may end before a page it does not reach: 64-byte steps
+            if (!rd(e[1] + k, p + k, 64)) { p[k] = 0; break; }
+            if (memchr(p + k, 0, 64)) break;
+        }
+        p[sizeof p - 1] = 0;
+        if (p[0]) out.push_back({e[0], p});
+    }
+}
+// notifyMonitorOfImageListChanges(unloading, count, loadAddresses[], imagePaths[]): with a debugger attached, the
+// notifier (lldb's breakpoint) runs as dyld's notification(mode, count, dyld_image_info[]) would
+static void h_helper_image_list_changes(GuestThread &t, u32) {
+    if (!g_dbg_on.load(std::memory_order_relaxed) || !g_dbg_notifier || !dbg_bp_active(g_dbg_notifier)) return;
+    const u64 n = (uint32_t)t.x(1);
+    const u64 *mh = (const u64 *)t.x(2), *paths = (const u64 *)t.x(3);
+    if (!n || !mh) return;
+    std::vector<u64> info(3 * n);
+    for (u64 k = 0; k < n; k++) { info[3 * k] = mh[k]; info[3 * k + 1] = paths ? paths[k] : 0; }
+    u64 regs[4] = {t.x(0), t.x(1), t.x(2), t.x(3)};
+    t.call(g_dbg_notifier, {(u64)(t.x(0) & 1), n, (u64)info.data()});
+    for (int k = 0; k < 4; k++) t.set_x(k, regs[k]);
+}
 static void h_helper_process_info(GuestThread &t, u32) {
     if (!g_all_image_infos[0]) g_all_image_infos[0] = 17;  // version
     t.set_x(0, (u64)g_all_image_infos);
@@ -421,7 +501,7 @@ static u64 build_syscall_helpers() {
         {"task_register_dyld_set_dyld_state", nullptr}, {"task_register_dyld_get_process_state", nullptr},
         {"task_info", nullptr}, {"thread_info", nullptr}, {"kdebug_is_enabled", h_generic_bool}, {"kdebug_trace", nullptr},
         {"kdebug_trace_string", nullptr}, {"amfi_check_dyld_policy_self", h_helper_amfi},
-        {"notifyMonitorOfMainCalled", h_noop}, {"notifyMonitorOfImageListChanges", h_noop},
+        {"notifyMonitorOfMainCalled", h_noop}, {"notifyMonitorOfImageListChanges", h_helper_image_list_changes},
         {"mach_msg_destroy", nullptr}, {"mach_port_construct", nullptr}, {"mach_port_destruct", nullptr},
         {"fstat$INODE64", nullptr}, {"vm_copy", nullptr}, {"task_dyld_process_info_notify_get", h_helper_notify_get},
         {"fsgetpath", nullptr}, {"getattrlistbulk", nullptr}, {"getattrlist", nullptr}, {"getfsstat$INODE64", nullptr},
@@ -544,6 +624,7 @@ static void fatal_exit(int code) {
 // A guest crash without a guest handler ends as on XNU: killed by that signal (the parent's wait status, RunningBoard's
 // crash reason), after libarm64jit's report.
 void die_with_signal(int sig, bool core) {
+    dbg_exiting(sig);
     if (!core) prctl(PR_SET_DUMPABLE, 0);
     struct sigaction sa{};
     sa.sa_handler = SIG_DFL;
@@ -624,6 +705,8 @@ static void on_fault(int sig, siginfo_t *si, void *uc) {
                 t->jit->LoadPinnedFromHost(h);
                 gpc = guest_fault_pc(*t, *blk, a, write);
             } else gpc = t->jit->GetPC();
+            // a debugger sees the fault first (EXC_BAD_ACCESS, KERN_INVALID_ADDRESS / KERN_PROTECTION_FAILURE, the address)
+            if (g_dbg_on.load() && blk) dbg_exception(*t, gpc, gsig, 1, gsig == 11 ? 1 : 2, a);
             const int res = guest_fault_now(*t, gsig, gcode, a, gpc, esr, uc, blk.has_value(), guard);
             if (res == 1) return;  // the access runs again (fixed, or faults again)
             if (res == 2) {
@@ -938,6 +1021,8 @@ static void start_memlog() {
         for (;;) {
             if (sem_wait(&g_memlog_sem) != 0) continue;  // EINTR
             while (sem_trywait(&g_memlog_sem) == 0) {}    // signals sent while this one waited: one dump for all
+            // x86sim debug / x86sim profile: a request to start the debugger stub, or to start / stop a profile
+            if (prof_check_request() | dbg_check_request()) continue;
             memlog_once(true);
         }
     }).detach();
@@ -1464,10 +1549,15 @@ extern "C" __attribute__((visibility("default"))) int a64_host_main(int argc, ch
         if (!s.compare(0, 22, "DYLD_SHARED_CACHE_DIR=")) cache_dir = s.substr(22);
         genv.push_back(strdup(s.c_str()));
     }
-    // 2026-11-03 defaults: JavaScriptCore without its FTL tier (JSC_useFTLJIT=false) unless the guest env sets it.
-    // FTL's B3 compiles run translated and cost more than they win here: JS bench 2.06-2.10 s vs 2.53-2.58 s with
-    // FTL (DFG off as well: 4.28 s; no JIT: 6.6 s); page loads unchanged. X86SIM_A64_JSC_FTL=1 keeps JSC's default.
-    if (!(getenv("X86SIM_A64_JSC_FTL") && atoi(getenv("X86SIM_A64_JSC_FTL")) == 1) &&
+    // JavaScriptCore keeps its FTL tier (JSC's default, as in Apple's simulator). From 2026-11-03 to 2026-11-24 every
+    // guest got JSC_useFTLJIT=false, as a short JS bench lost 20% with FTL. Likely why: an AOT image trained without
+    // FTL has none of its B3/Air compiler, so every WebContent live-translated it (~73% of the JIT worklist threads'
+    // time, 2026-11-24, before the image was updated; ~33% of far fewer samples after). With FTL off, hot JS
+    // never left DFG code (the loop keeps its counter on the stack and re-checks bounds every iteration): webcov's
+    // typed-array / numeric loops ran at 0.08 / 0.15 of Apple's simulator, 0.21 / 0.41 with FTL; a short mixed script
+    // (first runs and steady state) is equal either way once `x86sim-aot update` has the compiler from FTL-on
+    // WebContent runs in the image. X86SIM_A64_JSC_FTL=0: JSC_useFTLJIT=false again (a guest JSC_useFTLJIT=... wins).
+    if (getenv("X86SIM_A64_JSC_FTL") && atoi(getenv("X86SIM_A64_JSC_FTL")) == 0 &&
         std::none_of(genv.begin(), genv.end(), [](const char *v) { return !strncmp(v, "JSC_useFTLJIT=", 14); }))
         genv.push_back(strdup("JSC_useFTLJIT=false"));
     if (root.empty()) die("DYLD_ROOT_PATH is not set (the arm64 simulator runtime root)");
@@ -1498,6 +1588,7 @@ extern "C" __attribute__((visibility("default"))) int a64_host_main(int argc, ch
     map_commpage();
     Mapped main_exe = map_macho(exe, false);
     Mapped dyld = map_macho(root + "/usr/lib/dyld_sim", true);
+    g_dyld_path = root + "/usr/lib/dyld_sim";
     dyld_sim_patches(dyld.slide);
     if (!dyld.entry) die("dyld_sim has no entry point");
     u64 helpers = build_syscall_helpers();
@@ -1523,7 +1614,13 @@ extern "C" __attribute__((visibility("default"))) int a64_host_main(int argc, ch
     u64 gargv = (u64)&kargs[2], genvp = (u64)&kargs[env_at], gapple = (u64)&kargs[apple_at];
 
 
+    g_main_mh = main_exe.mh;
+    g_dyld_mh = dyld.mh;
+    g_dbg_notifier = dyld_notifier_address(dyld.mh);
+    dbg_set_notifier(g_dbg_notifier);
+    g_main_path = exe;
     GuestThread &t = GuestThread::self();
+    dbg_init_from_env();  // x86sim debug: X86SIM_A64_DEBUG=1|wait (gdbstub.cpp)
     gsample_start(&t);
     install_fault_report();
     double t_setup = ms_since(g_t0);

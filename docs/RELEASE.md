@@ -28,20 +28,28 @@ GitHub's runners, other distros.
 
 ## 2. What goes where
 
-**Inside the AppImage** (161 MB, zstd; nothing from Apple):
+**Inside the AppImage** (224 MB at 0.5.3-47, zstd; nothing from Apple):
 
 ```
 AppRun                         entry (build/release/AppRun)
 usr/share/x86sim/
   VERSION, DARLING_ID          version; content hash of the Darling tree (a new AppImage reinstalls Darling only if it changed)
   payload/                     `git ls-files` of cli host linux tools/debug tools/runtime tests + build outputs at their
-                               repo paths (linux/mtlvk/target/release/mtlvk, tools/launcher/target/release/*) — 57 MB
+                               repo paths (linux/mtlvk/target/release/mtlvk, tools/launcher/target/release/x86sim-{launcher,
+                               aot,mcp,ax,dev,serve,pool,devapp}) + external/omarchy-apple-dev's runtime files (the scripts
+                               `x86sim dev` runs: no receipts, docs, tests or demos)
   darling/                     Darling installed with prefix /opt/x86sim/darling (DESTDIR), + libarm64jit.so,
                                a64hugecopy, arm64host — 543 MB unpacked
-  bin/ipsw (MIT), bin/7zz + 7z (7-Zip, LGPL-2.1 + unRAR), pylib/dns (dnspython, ISC)
+  bin/ipsw (MIT), bin/7zz + 7z (7-Zip, LGPL-2.1 + unRAR), bin/rcodesign (MPL-2.0: re-signs converted .ipa / device
+                               builds), pylib/dns (dnspython, ISC)
+  webinspector/                WebKit's Web Inspector frontend for `x86sim inspect` (build/webinspector.sh: the
+                               WebInspectorUI files of Arch's webkit2gtk-4.1 2.54.3-1 package, sha256 pinned; BSD-2 + MIT,
+                               its LICENSE); AppRun copies it to <app>/webinspector. 227 files, 6.3 MiB unpacked;
+                               +1.19 MiB on the AppImage (zstd squashfs: 236.1 -> 237.4 MB, +0.5%), 2026-11-24
   install-helper.sh            the privileged step (system mode)
   darling-userns.sh            the no-root Darling wrapper (userns mode)
-  licenses/                    Darling (GPL-3 / APSL parts), dynarmic (0BSD), metal2vulkan (GPL-2+/LGPL-3+), astcenc (Apache-2)
+  licenses/                    Darling (GPL-3 / APSL parts), dynarmic (0BSD), metal2vulkan (GPL-2+/LGPL-3+), astcenc (Apache-2),
+                               lzfse (BSD-3), omarchy-apple-dev (MIT), webinspector (BSD-2 + MIT); NOTICE lists them all
 ```
 
 The committed simulator-side binaries in `host/` (simfb, simhid, simshim, simaudio frameworks/dylibs) are **ours**,
@@ -67,7 +75,7 @@ launcher, so AppRun copies the payload out once per version):
 ```
 
 AppRun sets `X86SIM_ROOT`, `X86SIM_SCRATCH`, `PATH` (bundled ipsw/7z), `X86SIM_PYLIB`, `A64_PREFIX_HEAL=0` (no
-Darling build tree to heal from). Subcommands: `x86sim.AppImage [launcher|aot|mcp|x86sim|shell|version]`.
+Darling build tree to heal from). Subcommands: `x86sim.AppImage [launcher|aot|mcp|dev|serve|x86sim|shell|version]`.
 In the checkout nothing changes: `repo_root()` is still the repo, `setup::needed()` is false, the Setup page only checks.
 
 ## 3. Root: two modes
@@ -126,8 +134,13 @@ it stays in the sidebar afterwards. The same steps from a terminal: `x86sim.AppI
 - `build/release/deps-ubuntu.sh`: packages on Ubuntu 24.04 + clang 23 from apt.llvm.org (+ `/usr/include/asm` link:
   Darling's fseventsd includes `<linux/types.h>` without Debian's multiarch dir).
 - `build/release/build.sh`: Darling (prefix `/opt/x86sim/darling`, `DESTDIR`), arm64jit, arm64host, mtlvk, launcher;
-  reads the checkout only, writes `build/release/out` (gitignored). `CCACHE=1` uses ccache.
-- `build/release/appimage.sh`: payload, Darling tree, pinned tools (sha256 checked), licenses, Apple-content check,
+  reads the checkout only, writes `build/release/out` (gitignored). `CCACHE=1` uses ccache (hits only when the checkout
+  and OUT paths are the same as the cached build's: Darling's compile lines carry both). Reproducible Darling:
+  `ZERO_AR_DATE=1` (ld64's N_OSO object timestamps) and `SOURCE_DATE_EPOCH` = Darling's commit time (`__DATE__`), so
+  the same Darling source gives the same `DARLING_ID` and an update reinstalls Darling only when it changed (before
+  2026-11-24 every build had a new id: 0.5.0 and 0.5.1, same Darling, `0caec06c…` vs `67543ed4…`).
+- `build/release/appimage.sh`: payload, Darling tree, pinned tools (sha256 checked), the Web Inspector frontend
+  (`build/webinspector.sh`: needs `zstd` and glib's `gresource`, in deps-ubuntu.sh), licenses, Apple-content check,
   appimagetool (continuous; prints its hash) → `x86sim-<version>-x86_64.AppImage` + `.zsync` + `SHA256SUMS`.
 - `build/release/docker-build.sh`: the same in an `ubuntu:24.04` container with the checkout mounted read-only (local
   check of the CI build).
@@ -137,7 +150,9 @@ it stays in the sidebar afterwards. The same steps from a terminal: `x86sim.AppI
   run naming a tag); each with AppImage, zsync, SHA256SUMS.
 
 Measured locally (Ryzen 7 9800X3D, `-j8`, a phone running alongside): Darling 26k targets ≈ 8.5 min wall, 50 CPU-min
-summed over jobs; arm64jit + arm64host < 1 min; mtlvk ≈ 1.5 min; launcher < 30 s; packing ≈ 1 min. Estimate on a
+summed over jobs; arm64jit + arm64host < 1 min; mtlvk ≈ 1.5 min; launcher < 30 s; packing ≈ 1 min.
+2026-11-24 (same host, `JOBS=6`, nice, other agents' phones running; 28.8k targets): cold 21.5 min (build.sh 1212 s +
+appimage.sh 78 s); warm ccache (same paths) + sccache 3.3 min (build.sh 126 s: Darling 74 s; appimage.sh 71 s). Estimate on a
 4-vCPU GitHub runner: 30–60 min cold, much less with ccache — well inside the 6 h limit. Disk: Darling build tree
 1.7 GB, destdir 0.55 GB, cargo targets 2.2 GB, shallow submodules a few GB: fits the ~14 GB free (+~25 GB after the
 cleanup step).
@@ -152,7 +167,9 @@ Fedora 39+, Arch/derivatives; not Ubuntu 22.04 / Debian 12. Mac-side bits are Ma
 
 Darling: GPL-3.0 with APSL-2.0 / BSD parts (Apple's open-source releases) — source is our public fork; the release
 notes should point at the exact submodule commits (GPL offer). dynarmic 0BSD, metal2vulkan GPL-2.0+/LGPL-3.0+ (dual),
-astc-encoder Apache-2.0, lzfse BSD-3, ipsw MIT, 7-Zip LGPL-2.1 + unRAR restriction (redistribution fine), dnspython ISC.
+astc-encoder Apache-2.0, lzfse BSD-3, ipsw MIT, 7-Zip LGPL-2.1 + unRAR restriction (redistribution fine), dnspython ISC,
+Web Inspector frontend BSD-2 (WebKit's WebInspectorUI; bundled CodeMirror MIT, Esprima BSD-2, three.js MIT, CSS
+documentation MIT: licenses/webinspector-LICENSE). Only the frontend's files ship, none of WebKitGTK's LGPL libraries.
 Our own code: GPL-3.0-or-later (LICENSE); bundled components and their licenses in NOTICE.
 
 ## 8. Decisions (2026-11-08)

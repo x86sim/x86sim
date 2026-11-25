@@ -479,7 +479,14 @@ void susp_thread_init(GuestThread &t) {
         if (g_reg_t[k].compare_exchange_strong(e, &t)) { g_reg_port[k].store(port_of(t)); break; }
     }
 }
+// every registered guest thread (x86sim debug; callers hold dbg_threads_mutex())
+void for_each_guest_thread(void (*fn)(GuestThread *, void *), void *arg) {
+    for (int k = 0; k < kReg; k++) if (GuestThread *t = g_reg_t[k].load()) fn(t, arg);
+}
 void susp_thread_fini(GuestThread &t) {
+    // the debugger's thread list holds GuestThreads under its mutex: not removed (and freed) meanwhile
+    // (x86sim profile's sampler too: always taken, a profile can start at any time; uncontended otherwise)
+    std::lock_guard<std::mutex> dl(dbg_threads_mutex());
     for (int k = 0; k < kReg; k++) if (g_reg_t[k].load() == &t) { g_reg_port[k].store(0); g_reg_t[k].store(nullptr); break; }
     if (t.susp_timer) { timer_delete((timer_t)t.susp_timer); t.susp_timer = nullptr; }
 }

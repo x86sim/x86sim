@@ -89,8 +89,10 @@ running one (`A64_MTLVK_SOCKET`), and waits up to 5 s for the socket. If mtlvk d
 Diagnostics (mtlvk): `MTLVK_DUMP_PASSES=<dir>` (colour attachments after every render pass, resolve textures for
 MSAA; every level of the textures a compute encoder bound; compute buffer bindings logged; `MTLVK_DUMP_MAX`
 command buffers, default 60; view with a raw-to-PNG script), `MTLVK_DUMP_REPLACE=<dir>` (every replaceRegion's
-bytes), and refused render pipelines are written to `run/failed/` (replay: `rpsrepro <profile> <id>-vert.metallib
-<id>-frag.metallib I:FORMAT... stencil=N`). `astctest` (bin) + tools/debug/astccmp.py check MTLSimDriver's ASTC kernel
+bytes), and refused render pipelines are written to `var/metal/failed/` (replay through the compiler: `rpsrepro
+<profile> <id>-vert.metallib <id>-frag.metallib I:FORMAT... stencil=N`; through metal2vulkan-runtime on this GPU, as
+RPS_NEW does: `rpsgpu <id>-vert.metallib <id>-frag.metallib I:FORMAT... depth=N stencil=N samples=N` — the dump
+holds no vertex descriptor, so a function with `[[stage_in]]` stops at `VertexAttribute`). `astctest` (bin) + tools/debug/astccmp.py check MTLSimDriver's ASTC kernel
 against a CPU decoder.
 Optional: `X86SIM_VKMTL_LOG=1` (metalhostd trace), `X86SIM_VKMTL_DUMP=1` (metalhostd saves every metallib it
 receives to `var/metal/captured/`), `X86SIM_METAL_PROFILE=<n>` (hostFeatureProfile, default 10001 =

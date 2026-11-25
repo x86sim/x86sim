@@ -118,7 +118,7 @@ impl App {
                 DarlingState::Ready if setup::userns() => "Ready, without root: it runs in a user namespace of your own. Nothing to install.".into(),
                 DarlingState::Ready => format!("Installed in {}", setup::OPT_DARLING),
                 DarlingState::Outdated { .. } => "This version of x86Sim brings a newer build.".into(),
-                _ => format!("Copied to {} once, owned by root: its launcher must be setuid root to set up each phone's container.", setup::OPT_DARLING),
+                _ => format!("Copied to {} once, owned by root: its launcher must be setuid root to set up each device's container.", setup::OPT_DARLING),
             };
             list_row(ui, icon::SHIELD_CHECK, "Darling", &detail, |ui| {
                 if setup::appimage().is_some() && !ready && !self.setup.installing {
@@ -252,16 +252,16 @@ impl App {
 
         // 5. first phone
         let phones = !self.insts.is_empty();
-        step_header(ui, 5, "Your first phone", phones);
+        step_header(ui, 5, "Your first device", phones);
         let mut add = false;
         let mut finish = false;
         list_card(ui, |ui| {
-            let detail = if phones { format!("{} phone{} made", self.insts.len(), if self.insts.len() == 1 { "" } else { "s" }) } else { "Pick a model (iPhone or iPad); each phone has its own apps and data.".into() };
+            let detail = if phones { format!("{} device{} made", self.insts.len(), if self.insts.len() == 1 { "" } else { "s" }) } else { "Pick a model (iPhone or iPad); each device has its own apps and data.".into() };
             list_row(ui, icon::DEVICE_MOBILE, "Phone", &detail, |ui| {
                 if phones {
                     finish = ui.add(Btn::primary("Done").icon(icon::CHECK)).clicked();
                 } else {
-                    add = ui.add_enabled(have_rt && ready, Btn::primary("Add phone").icon(icon::PLUS)).clicked();
+                    add = ui.add_enabled(have_rt && ready, Btn::primary("Add device").icon(icon::PLUS)).clicked();
                 }
             });
         });

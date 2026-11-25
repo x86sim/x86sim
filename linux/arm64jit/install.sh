@@ -6,8 +6,13 @@ X86SIM_ROOT=${X86SIM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}; . "$X86SIM_ROO
 set -e
 B=${ARM64JIT_BUILD:-$X86SIM_SCRATCH/arm64/build-arm64jit}
 mkdir -p "$B"
-[ -f "$B/build.ninja" ] || cmake -S "$X86SIM_ROOT/linux/arm64jit" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ > "$B/cmake.log"
+# ccache when installed (CI sets it up too): a build dir configured without it is reconfigured once to use it
+CC_LAUNCH=$(command -v ccache || true)
+if [ ! -f "$B/build.ninja" ] || { [ -n "$CC_LAUNCH" ] && ! grep -q '^CMAKE_CXX_COMPILER_LAUNCHER:.*ccache' "$B/CMakeCache.txt" 2>/dev/null; }; then
+	cmake -S "$X86SIM_ROOT/linux/arm64jit" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+		${CC_LAUNCH:+-DCMAKE_C_COMPILER_LAUNCHER=$CC_LAUNCH -DCMAKE_CXX_COMPILER_LAUNCHER=$CC_LAUNCH} > "$B/cmake.log"
+fi
 nice ninja -C "$B" -j"${JOBS:-6}" arm64jit a64hugecopy
 "$X86SIM_ROOT/host/arm64host/build.sh" "$X86SIM_DARLING_BUILD"
 D=$X86SIM_PREFIX/libexec/darling/usr/libexec/darling

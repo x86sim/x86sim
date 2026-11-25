@@ -26,7 +26,7 @@ started by the launcher (`tools/launcher`) through `cli/libexec/arm64/boot-a64.s
  hostnet.py (linux/hostnet) --plist--> netconfig -> host-configd store -> configd_sim's SimulatorSupport
  simview.py / fb2png.py  <== frame ring ===============    SimFramebuffer.framework (host/simfb) in backboardd
  simview.py / simtouch.py  == simhid.sock ==>                 SimulatorHID.framework (host/simhid) in backboardd
- simaudio.py (PipeWire)    <== simaudio.sock ==             libsimaudio (host/simaudio, opt-in) in each process
+ simaudio.py (PipeWire, tap) <== simaudio.sock ==             libsimaudio (host/simaudio) in each process
  darlingserver (Darling, Linux process): Mach IPC, threads, VM, memfd-backed shared memory for every container process
 ```
 
@@ -90,7 +90,7 @@ profiles: the install's own `.bin` files and the shipped `cli/libexec/arm64/trai
    device's feature toggles (`<device>/features.json`, definitions in `cli/libexec/arm64/features-def.json`) and
    `A64_DROP`, and runs `cli/libexec/mksimdevice.py`;
 3. stops this prefix's previous container (its own processes only, found by exact checks), then starts
-   `linux/mdnsd/mdnsresponder.py`, `cli/libexec/jetsam.py` and, with `X86SIM_AUDIO=1`, `cli/libexec/simaudio.py`;
+   `linux/mdnsd/mdnsresponder.py`, `cli/libexec/jetsam.py` and `cli/libexec/simaudio.py`;
 4. runs `cli/libexec/arm64/boot-inner.sh` inside the systemd scope of `cli/libexec/limited.sh` (IO cap and memory cap
    `X86SIM_MEM_MAX`; without a systemd user manager, uncapped and outside any scope), which moves this phone's Darling processes into the scope and runs `darling shell` with
    `host/simhost/simhost`, which execs the runtime's `launchd_sim` with the device's environment.
@@ -216,10 +216,14 @@ id, openat/mkdirat/... on behalf of extensions, package lookup, directory entrie
 ## Audio: simaudio
 
 `host/simaudio/arm64/libsimaudio.dylib`, injected into each process, provides the audio devices a Mac's CoreSimulator
-and coreaudiod would, and streams PCM over `simaudio.sock` to `cli/libexec/simaudio.py` (PipeWire), started by
-boot-a64.sh, with `X86SIM_AUDIO=1`. Without it the devices are there but silent (no socket: the output drops the PCM on
-its clock, the input reads silence), as the simulator always has an output device: AVPlayer refuses items with audio
-(CoreMediaErrorDomain -12746) when there is none (see [WORKAROUNDS.md](WORKAROUNDS.md)).
+and coreaudiod would, and streams PCM over `simaudio.sock` to `cli/libexec/simaudio.py`, which boot-a64.sh starts on
+every boot. With `X86SIM_AUDIO=1` it plays the output on PipeWire and records the host's microphone; otherwise input
+streams get silence. Either way it offers the output streams on a tap, `simaudio-tap.sock` in the state dir, where
+`x86sim serve` (`tools/launcher/core/src/share/audio.rs`) mixes them for a browser (Opus or PCM on the page's
+WebSocket) and feeds a browser's microphone back to the input streams. `X86SIM_AUDIO_SOCKET=none` leaves the devices
+without a socket (the output drops the PCM on its clock, the input reads silence); the devices are always there, as the
+simulator always has an output device: AVPlayer refuses items with audio (CoreMediaErrorDomain -12746) when there is
+none (see [WORKAROUNDS.md](WORKAROUNDS.md)).
 
 ## Test helpers inside the device
 
@@ -263,7 +267,7 @@ prefixes, JIT/AOT caches) are in `$X86SIM_SCRATCH`.
 | IOSurface | IOSurface.framework | XPC `com.apple.IOSurface.Remote` + xpc_shmem | iosurfaced |
 | DNS | libsystem_dnssd | `/var/run/mDNSResponder` -> the boot's `mDNSResponder` socket | mdnsresponder.py |
 | network state | hostnet.py | plist -> netconfig -> host-configd | configd_sim (SimulatorSupport) |
-| audio | libsimaudio | `simaudio.sock` | simaudio.py (PipeWire) |
+| audio | libsimaudio | `simaudio.sock` | simaudio.py (PipeWire; its tap: x86sim serve) |
 | host files | FileProvider | XPC `com.apple.FileProvider.sim2host` | fpsim2host |
 | install app | x86sim install (appinstall.sh copies the .app into `data/tmp/x86sim-install`) | `<device>/data/tmp/x86sim-openurl` | openurl job -> InstallCoordination -> installd |
 | open URL/app | x86sim openurl/app | `<device>/data/tmp/x86sim-openurl` | openurl job -> FrontBoard |

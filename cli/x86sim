@@ -6,14 +6,22 @@
 set -u
 self=$(readlink -f "$0")
 export X86SIM_ROOT=${X86SIM_ROOT:-$(cd "$(dirname "$self")/.." && pwd)}
+_ring_given=${SIMFB_RING_LINUX+x}
 . "$X86SIM_ROOT/cli/lib/config.sh"
+# a <device> picked from the arguments (pick_device) after config.sh chose the configured device's frame ring: that
+# device's ring instead, unless the caller set SIMFB_RING_LINUX (io screenshot / recordVideo read another phone's)
+use_device() {
+	_picked=1
+	export X86SIM_DEVICE
+	[ -n "$_ring_given" ] || export SIMFB_RING_LINUX=/dev/shm/x86sim-$(basename "$X86SIM_DEVICE" | sed 's/^device-//')-simfb.ring
+}
 X=$X86SIM_ROOT; L=$X/cli/libexec; ST=$X86SIM_STATE
 
 usage() {
 	cat <<'U'
 usage: x86sim <command> [args]
 
-Phones
+Devices
   wait [home|app] [s]  wait for the home screen (or an app page) on the framebuffer
   device models|list   arm64 device models (iPhone, iPad, Apple TV, Apple Watch) / devices (var/device-a64*)
   device create --model "iPhone 17 Pro" [name]
@@ -21,7 +29,61 @@ Phones
                        or Apple Watch model takes the newest tvOS / watchOS runtime in runtimes/
   runtime list [ios|tvos|watchos|all] | url B | fetch B
                        27.x simulator runtimes from Apple (no Mac / Apple ID): fetch downloads build B into runtimes/
+  runtime delete B [--all] [--stop] [--yes] [--dry-run] [--json]
+                       delete an installed version: its runtime files only, or --all also its pre-translated code
+                       (jc-<build>, its files in shared caches, download log; shared data stays). Sizes and the devices
+                       on it are shown first; a running device blocks it (--stop stops those devices first)
   logs [label]         list the device's job logs, or tail one (<device>/data/var/log/<label>.log)
+  logs BUNDLEID [--follow] [--relaunch] [--lines N]
+                       an app's os_log and the crash report of its last run, symbolicated (devctl.py applog);
+                       --relaunch restarts it with its os_log recorded and follows it
+  erase | clone NEWNAME
+                       the device back to new (simctl erase) / a copy as a new device (simctl clone); the device must be off
+  ui [appearance|content_size|increase_contrast|reduce_transparency|reduce_motion] [VALUE]
+                       as simctl ui: light|dark, a Dynamic Type size (large, extra-large, accessibility-medium, ...,
+                       increment, decrement), enabled|disabled; no VALUE prints the setting. Off devices: at next boot
+  status_bar override [--time T] [--dataNetwork wifi|5g|lte|...] [--wifiBars N] [--cellularBars N]
+                      [--operatorName S] [--batteryState charging|charged|discharging] [--batteryLevel N] ... | clear | list
+                       as simctl status_bar (clean screenshots): overrides add up until clear
+  pbcopy [--host] [TEXT] | pbpaste [--host] | pbsync
+                       the device's pasteboard (simctl pbcopy / pbpaste: TEXT or stdin); --host takes / puts the host
+                       clipboard (wl-clipboard, xclip or xsel); pbsync keeps both the same until Ctrl-C
+  keychain reset | locale [--language fr-CA,en] [--locale fr_CA] | timezone [ZONE|host]
+                       delete every keychain item; the language / region (apps pick it up at their next start); the
+                       device's time zone (next boot)
+  fidelity [fast|high] fast: a 3x iPhone drawn at 2x (fewer pixels) + Reduce Transparency and Reduce Motion; high:
+                       native scale, every effect (the scale applies at the next boot)
+
+Agents (read the screen as text, act on elements; same core as the MCP server's snapshot / tap / ... tools)
+  [--phone NAME] <command>   any command on a device by name / folder / path (default: x86sim.env's X86SIM_DEVICE)
+  snapshot [--diff] [--all] [--json]
+                       the screen as text: the front app's accessibility elements, SpringBoard's (alerts, home screen,
+                       status bar) and web content, one per line: @e3 role "label" value= id= [states] (x,y points).
+                       Refs stay with their element across snapshots. --diff: only changes since the last snapshot
+  find TARGET          what a target matches. TARGET: @e3 | id:IDENTIFIER | "label text" | X Y (points)
+  tap TARGET | long-press TARGET [--ms N]
+                       touch an element (scrolled into view first if needed); answers with the screen after it settled
+                       (--after diff|none). tap X Y with two numbers stays device pixels (below)
+  type TEXT [--clear] [--submit] [--keys]
+                       into the focused field as the software keyboard does (any characters); --keys: key presses
+  key NAME|COMBO       return tab escape delete up down ... or cmd+a, shift+tab (a number: a HID usage)
+  scroll up|down|left|right [SCREENS] [--at TARGET] | scroll-to TARGET [--dir D] | swipe up|down|left|right|home|back
+  wait-for TARGET [--gone] [--timeout S]
+                       until it shows (or goes); wakes on new frames
+  press BUTTON | open URL
+                       a hardware button / a URL, answering with the screen
+  ax-inspect [TARGET | X Y] [--json]
+                       Accessibility Inspector: an element's properties (label, value, hint, traits, actions, custom
+                       actions, rotors, language, class, view, controller, hierarchy, font / color)
+  ax-audit [PHONE] [--dynamic-type] [--all] [--rules a,b] [--json]
+                       accessibility audit of the app in front: labels, 44 pt targets, WCAG contrast, Dynamic Type,
+                       duplicate labels, controls VoiceOver cannot reach, missing button traits
+  ax-action NAME [TARGET] [--dir D] [--name CUSTOM]
+                       activate | increment | decrement | scroll | escape | magic_tap | custom, as VoiceOver does
+  keyboard software on|off|toggle | keyboard hardware connect|disconnect|toggle | keyboard [status]
+                       Apple's I/O > Keyboard: Toggle Software Keyboard (Cmd-K: the on-screen keyboard while a hardware
+                       keyboard is connected), Connect Hardware Keyboard (Shift-Cmd-K; disconnected, the software
+                       keyboard shows on every focus as on a device; kept across boots). type works either way
 
 Display and input
   view [--bg]          GTK viewer window with mouse/keyboard input (simview.py; DISPLAY defaults to :0)
@@ -49,9 +111,20 @@ Display and input
                        input through the SimulatorHID stand-in (simtouch.py; device pixels). Apple TV: the arrow keys,
                        return (select) and escape (back) are the remote
   fps [secs]           delivered frames per second (fpsmeter.py)
+  serve [--bg] [--listen ADDR] [--tailscale|--funnel] [--cloudflared] [--ttl 2h] [--open]
+                       every device in a browser: dashboard, live screen (H.264 / JPEG), touch, keys, paste, buttons;
+                       --tailscale: HTTPS on your tailnet, --funnel / --cloudflared: a public HTTPS URL (token links)
+  serve status | stop [TUNNEL] | link [--phone NAME] [--control] [--ttl 1h]
+                       the running server's URLs (and a QR code), stop it or one tunnel, a new expiring link
+  inspect [PHONE] [--url PATTERN] [--list] [--no-open]
+                       Web Inspector (WebKit's, in your browser) for Safari's pages and apps' WKWebViews that set
+                       isInspectable; --url opens the first page whose URL or title has PATTERN; --list only lists
 
 Apps (as xcrun simctl install/uninstall/launch)
-  install PATH.app     install an iOS-simulator app (arm64) through installd; it gets a container and an icon
+  install PATH.app|PATH.ipa|PATH.xcarchive
+                       install an app through installd; it gets a container and an icon. A device build (.ipa,
+                       .xcarchive, a device .app) is converted for the simulator first (arm64 only; FairPlay-encrypted
+                       App Store downloads are refused); x86sim-devapp inspect PATH shows what it is
   uninstall BUNDLEID   remove an installed app
   launch [--console|--console-pty] [-w|--wait-for-debugger] [--terminate-running-process] [--oslog] [--env K=V] BUNDLEID [args...]
                        open an app through FrontBoard with arguments and environment (SIMCTL_CHILD_NAME=value in
@@ -74,10 +147,43 @@ Apps (as xcrun simctl install/uninstall/launch)
   log stream [--app BUNDLEID] [--process NAME] [--match TEXT]
                        os_log of an app (relaunched; libsimshim formats os_log into a file) or of a process
   pidof BUNDLEID       pid of the running app (inside Darling)
+  debug [PHONE] BUNDLEID|PID [--launch|--wait] [--symbols X.dSYM] [--batch] [-o CMD]...
+                       LLDB on the app: attach to it running, or --launch it stopped before dyld; breakpoints, step,
+                       bt all, variables (C / Objective-C; Swift values need swift-lldb), registers, memory
+                       (lldbattach.py; --start / --cmd / --stop: the MCP server's session)
+  profile [PHONE] BUNDLEID|PID [--secs N] [--out FILE] [--format speedscope|gecko|text] [--period-us N]
+                       CPU profile of the app (as Instruments' Time Profiler): top functions by self / total time per
+                       thread, and a speedscope or Firefox Profiler file (the translator's sampler, profile.rs)
   spawn [--env K=V] [--timeout S] PROGRAM [args...]
                        run a simulator binary in the device (as simctl spawn): its output, its exit status
   io screenshot [out.png] | io recordVideo [--codec h264|hevc] [--secs N] OUT.mp4
                        as simctl io: newest frame / MP4 from the frame ring until Ctrl-C
+
+Tests (as xcodebuild test-without-building; cli/libexec/xctest.py, `x86sim test --help`)
+  test [PHONE] --xctestrun FILE.xctestrun [--only-testing T] [--skip-testing T] [--json F] [--junit F]
+  test [PHONE] --app A.app [--test-bundle B.xctest] | --test-bundle B.xctest | --ui-test-runner R.app --app A.app
+  test [PHONE] --spm DIR
+                       run XCTest unit / logic tests and XCUITest UI tests (UI tests: the device's xctest feature):
+                       per-test results, failures with file:line, junit.xml + results.json; exit 0 passed, 1 failed.
+                       XCTest's frameworks come from Xcode (sdks/<Platform>.platform or the x86sim dev SDK)
+  test fetch-platform [ios|tvos|watchos|xros]
+                       copy Xcode's XCTest frameworks for that simulator from $X86SIM_MAC into sdks/
+
+Develop apps (omarchy-apple-dev, external/omarchy-apple-dev; `x86sim dev help` for all)
+  dev status | setup [all|swift|toolchain|sdk --xip X|repair|verify] [--bg] | job [--follow]
+                       the app toolchain (Swift, xtool, the iOS SDK from Xcode.xip): state, install (no root)
+  dev new NAME | build [DIR] | run [DIR] [--phone P] [--start] | test [DIR] [--phone P]
+                       a new SwiftUI app; build it for the simulator; build + install + launch on a device in one step
+  dev test --xctest [DIR] [--phone P]
+                       the package's XCTest / Swift Testing tests, built here and run on the device (x86sim test --spm)
+  dev device | ship | ship-mac | convert | auth
+                       real iPhones (device-run.sh), App Store / TestFlight (ship.sh), Xcode project conversion
+Pool (devices kept booted for agents / CI; x86sim-pool, see `x86sim pool help`)
+  pool up N [--model M] [--preset lean]   clone and boot N devices (memory permitting)
+  pool take [--ttl S] [--reset none|apps|restart|erase] [--pid PID|--hold-parent] [--wait S]
+                       a booted free device's name; the lease ends at the TTL or when the holder process exits
+  pool release PHONE [--reset MODE] | renew PHONE | status | down [--delete] | ksm [on|off]
+                       (--pool NAME for another pool; default "pool")
 
 Build
   build [target]       make [target] in the repo root (mtlvk, darling, ...; see `make help`)
@@ -112,31 +218,129 @@ cmd_screenshot() {
 }
 
 cmd_logs() {
+	. "$X/cli/lib/pickdevice.sh"
+	if [ $# -ge 2 ] && pick_device "$1"; then shift; use_device; fi
 	local d=$X86SIM_DEVICE/data/var/log
-	if [ $# = 0 ]; then ls -t "$d"; else exec tail -n "${LINES:-50}" -F "$d/$1.log"; fi
+	if [ $# = 0 ]; then ls -t "$d"; return; fi
+	# --app BUNDLEID: always the app's log (the MCP server's app_logs: never a job log that `tail -F` follows forever)
+	if [ "$1" = --app ]; then shift; exec python3 "$L/devctl.py" applog "$@"; fi
+	# an app (bundle id): its os_log and its last crash (devctl.py applog); else a job's log (a name in var/log, no path)
+	if [ ! -e "$d/$1.log" ] && case $1 in *.*) true ;; *) false ;; esac; then exec python3 "$L/devctl.py" applog "$@"; fi
+	case $1 in */*|..*|-*) echo "x86sim logs: $1 is not a job or app name" >&2; exit 2 ;; esac
+	exec tail -n "${LINES:-50}" -F "$d/$1.log"
 }
 
+# --phone NAME (or -p NAME) before the command: the phone every command acts on (its name, folder or path), for input,
+# screenshots and the agent commands alike
+while [ $# -ge 2 ] && { [ "$1" = --phone ] || [ "$1" = -p ]; }; do
+	. "$X/cli/lib/pickdevice.sh"
+	pick_device "$2" || { echo "x86sim: no device $2" >&2; exit 2; }
+	export X86SIM_DEVICE
+	export SIMHID_SOCKET=$X86SIM_DEVICE/data/simhid.sock
+	_v=$(basename "$X86SIM_DEVICE"); export SIMFB_RING_LINUX=/dev/shm/x86sim-${_v#device-}-simfb.ring
+	shift 2
+done
 [ $# -ge 1 ] || { usage; exit 2; }
 c=$1; shift
+# the agent commands (tools/launcher x86sim-ax, the MCP server's core)
+ax() {
+	local b=$X/tools/launcher/target/release/x86sim-ax
+	[ -x "$b" ] || { echo "x86sim: build the launcher first: cd tools/launcher && cargo build --release" >&2; exit 1; }
+	exec "$b" "$@"
+}
+num() { case $1 in ''|*[!0-9.-]*) return 1 ;; esac; }
 case $c in
 	help|-h|--help) usage ;;
 	wait) exec python3 "$L/framecheck.py" wait "${1:-home}" "${2:-300}" ;;
 	device) exec python3 "$L/arm64/device-a64.py" "$@" ;;
-	runtime) exec python3 "$L/arm64/runtime-fetch.py" "$@" ;;
+	runtime)
+		if [ "${1:-}" = delete ]; then
+			# core rtdelete.rs (shared with the launcher's Versions page and the MCP tool runtime_delete)
+			exec "$X/tools/launcher/target/release/x86sim-aot" runtime "$@"
+		fi
+		exec python3 "$L/arm64/runtime-fetch.py" "$@" ;;
 	logs) cmd_logs "$@" ;;
 	view) cmd_view "$@" ;;
 	screenshot|shot) cmd_screenshot "$@" ;;
-	tap|swipe|pinch|pan2|key|home|lock|crown|openurl|app|dismiss|raw|button|shake|rotate|orientation|biometric|gamepad|memwarn|pointer|gesture|appswitcher|standby|trackpad)
+	snapshot|snap|find|long-press|scroll|scroll-to|wait-for|press|open) ax "$c" "$@" ;;
+	# the Accessibility Inspector (x86sim-ax inspect / audit / action): a leading phone name as for the device commands
+	ax-audit|ax-inspect|ax-action)
+		if [ $# -ge 1 ] && case $1 in -*) false ;; *) true ;; esac && [ "$c" = ax-audit ]; then
+			p=$1; shift; ax --phone "$p" audit "$@"
+		fi
+		ax "${c#ax-}" "$@" ;;
+	# tap X Y / swipe X1 Y1 X2 Y2 in device pixels (simtouch.py); tap @e3 / tap "General" / swipe up: an element or
+	# direction (x86sim-ax, points)
+	tap) if [ $# -ge 2 ] && num "$1" && num "$2"; then exec python3 "$L/simtouch.py" tap "$@"; else ax tap "$@"; fi ;;
+	swipe) if [ $# -ge 4 ] && num "$1"; then exec python3 "$L/simtouch.py" swipe "$@"; else ax swipe "$@"; fi ;;
+	key) if [ $# = 1 ] && num "$1"; then exec python3 "$L/simtouch.py" key "$@"; else ax key "$@"; fi ;;
+	pinch|pan2|home|lock|crown|openurl|app|dismiss|raw|button|shake|rotate|orientation|biometric|gamepad|memwarn|pointer|gesture|appswitcher|standby|trackpad)
 		exec python3 "$L/simtouch.py" "$c" "$@" ;;
-	type|text) exec python3 "$L/simtouch.py" text "$*" ;;
+	keyboard)
+		# a leading <device> as for the simctl-style commands (the launcher's Simulate section passes the phone's folder)
+		. "$X/cli/lib/pickdevice.sh"
+		if [ $# -ge 1 ] && case $1 in software|sw|hardware|hw|status) false ;; *) true ;; esac && pick_device "$1"; then shift; use_device; fi
+		ax keyboard "$@" ;;
+	# type: into the focused field as the software keyboard (any text; --clear --submit; --keys: key presses)
+	type) ax type "$@" ;;
+	text) exec python3 "$L/simtouch.py" text "$*" ;;
 	fps) exec python3 "$L/fpsmeter.py" "${1:-10}" ;;
+	serve|share)
+		b=${X86SIM_SERVE:-$X/tools/launcher/target/release/x86sim-serve}
+		[ -x "$b" ] || { echo "x86sim: $b is not built (cd tools/launcher && cargo build --release)" >&2; exit 1; }
+		exec "$b" "$@" ;;
+	inspect)
+		# Web Inspector: Safari's and apps' web pages (share/inspect.rs, through x86sim-serve)
+		b=${X86SIM_SERVE:-$X/tools/launcher/target/release/x86sim-serve}
+		[ -x "$b" ] || { echo "x86sim: $b is not built (cd tools/launcher && cargo build --release)" >&2; exit 1; }
+		exec "$b" inspect "$@" ;;
+	profile)
+		# CPU profiler (libarm64jit prof.cpp's sampler, symbolicated by x86sim-serve profile); a leading <device> as for launch
+		. "$X/cli/lib/pickdevice.sh"
+		if [ $# -ge 2 ] && case $1 in -*) false ;; *) true ;; esac && pick_device "$1"; then shift; use_device; fi
+		export X86SIM_DEVICE
+		b=${X86SIM_SERVE:-$X/tools/launcher/target/release/x86sim-serve}
+		[ -x "$b" ] || { echo "x86sim: $b is not built (cd tools/launcher && cargo build --release)" >&2; exit 1; }
+		exec "$b" profile "$@" ;;
 	install|uninstall) exec "$L/appinstall.sh" "$c" "$@" ;;
+	test|xctest)
+		# XCTest / XCUITest bundles (xctest.py); a leading <device> as for launch
+		. "$X/cli/lib/pickdevice.sh"
+		if [ $# -ge 2 ] && case $1 in -*|*.xctestrun|fetch-platform) false ;; *) true ;; esac && pick_device "$1"; then shift; use_device; fi
+		export X86SIM_DEVICE
+		exec python3 "$L/xctest.py" "$@" ;;
+	debug)
+		# LLDB on an app in the phone (lldbattach.py, the stub in libarm64jit); a leading <device> as for launch
+		. "$X/cli/lib/pickdevice.sh"
+		if [ $# -ge 2 ] && case $1 in -*) false ;; *) true ;; esac && pick_device "$1"; then shift; use_device; fi
+		export X86SIM_DEVICE
+		exec python3 "$L/lldbattach.py" "$@" ;;
 	launch|terminate|get_app_container|listapps|push|location|privacy|addmedia|log|io|pidof|spawn)
 		# simctl-style leading <device> (x86sim launch apps com.foo): a phone's name/folder/dir
 		. "$X/cli/lib/pickdevice.sh"
-		if [ $# -ge 1 ] && { [ $# -ge 2 ] || [ "$c" = listapps ]; } && pick_device "$1"; then shift; export X86SIM_DEVICE; fi
+		if [ $# -ge 1 ] && { [ $# -ge 2 ] || [ "$c" = listapps ]; } && pick_device "$1"; then shift; use_device; fi
 		exec python3 "$L/simctl.py" "$c" "$@" ;;
+	pool)
+		b=$X/tools/launcher/target/release/x86sim-pool
+		[ -x "$b" ] || { echo "x86sim pool: build tools/launcher first (cargo build --release)" >&2; exit 1; }
+		exec "$b" "$@" ;;
+	ui|status_bar|statusbar|pbcopy|pbpaste|pbsync|keychain|locale|timezone|fidelity|erase|clone)
+		# simctl's device settings / erase / clone (devctl.py); a leading <device> as for the commands above
+		. "$X/cli/lib/pickdevice.sh"
+		if [ $# -ge 1 ] && { [ $# -ge 2 ] || case $c in erase|keychain|ui|fidelity|timezone|locale|pbpaste|pbsync) true ;; *) false ;; esac; } && pick_device "$1"; then shift; use_device; fi
+		[ "$c" = statusbar ] && c=status_bar
+		# erase / clone destroy or copy a whole phone: only one named here, never the configured default (a name that
+		# matched no phone fell back to X86SIM_DEVICE and erased it)
+		case $c in erase|clone)
+			case "$X86SIM_DEVICE" in */var/device-a64*) ;; *) echo "x86sim $c: name the device (x86sim $c NAME); ${1:-none given} is no device" >&2; exit 2 ;; esac
+			[ "${_picked:-}" = 1 ] || { echo "x86sim $c: no device ${1:-} (x86sim device list)" >&2; exit 2; } ;;
+		esac
+		exec python3 "$L/devctl.py" "$c" "$@" ;;
 	build) exec make -C "$X" "$@" ;;
+	dev)
+		b=$X/tools/launcher/target/release/x86sim-dev
+		[ -x "$b" ] || { echo "x86sim: $b not built (cd tools/launcher && cargo build --release)" >&2; exit 1; }
+		exec "$b" "$@" ;;
 	repos) exec "$L/repos.sh" "$@" ;;
 	upstream-sync) exec "$L/repos.sh" upstream-sync "$@" ;;
 	*) echo "x86sim: unknown command $c" >&2; usage >&2; exit 2 ;;

@@ -48,6 +48,8 @@ jobs:
           git submodule update --init --depth 1 --jobs 8 external/metal2vulkan
           git submodule update --init --recursive --depth 1 --jobs 8 external/dynarmic
           git submodule update --init --recursive --depth 1 --jobs 8 external/darling
+          # x86sim dev's scripts (appimage.sh packs them; it refuses to pack without them)
+          git submodule update --init --depth 1 external/omarchy-apple-dev
           du -sh external/*
 
       - name: Packages
