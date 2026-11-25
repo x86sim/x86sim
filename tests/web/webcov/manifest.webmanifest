@@ -1,0 +1,2 @@
+{ "name": "webcov", "short_name": "webcov", "start_url": "/index.html", "display": "standalone",
+  "icons": [{ "src": "res/icon.svg", "sizes": "any", "type": "image/svg+xml" }] }

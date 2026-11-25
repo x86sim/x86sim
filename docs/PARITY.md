@@ -19,6 +19,8 @@ entitlement-gated services) is not counted as an x86Sim gap.
   four: iOS 248/18/0, tvOS 203/7/0, watchOS 143/5/0, visionOS 208/11/0. Later rounds added checks; their state per
   framework, and every remaining difference, is in
   [COVERAGE-GAPS.md](../tests/apps/sdkcov/COVERAGE-GAPS.md).
+- **webcov** (`tests/web/webcov`): 261 web-platform checks in Safari with expected values, run on x86Sim and on
+  Apple's simulator on the Mac mini (`run.sh --ref-mac`); see [Web platform](#web-platform).
 - **Input checks** (`tests/apps/sdkcov/inputs.sh`): shake, orientation, biometrics, game controller, memory warning,
   push, context menus, pickers, widgets, Control Center and others driven on both sides.
 - **The regression apps** in `tests/apps` (UIKit, SwiftUI, networking, Core Data, Metal, SpriteKit, audio).
@@ -108,6 +110,20 @@ entitlement-gated services) is not counted as an x86Sim gap.
 | `pair`, `unpair`, `pair_activate` | none | gap |
 | (none) | `locale`, `timezone`, `fidelity`, `logs BUNDLEID`, `biometric`, `shake`, `rotate`, `gamepad`, `button`, `crown` | better: Simulator.app menu items as commands |
 
+## Web platform
+
+Safari 27.2 on an iPhone 17 Pro, the same runtime on both sides; 261 checks of the JavaScript engine (ES2025,
+WebAssembly incl. SIMD / threads / exceptions / GC, SharedArrayBuffer with COOP / COEP), workers, storage, network,
+graphics (Canvas, WebGL with read-back pixels, fonts, SVG, CSS effects), media, device APIs, DOM / CSS and a few
+benchmarks. Full table, diagnosis and perf ratios: [tests/web/webcov/COVERAGE.md](../tests/web/webcov/COVERAGE.md).
+
+| Area | x86Sim | Rating | Verified |
+|---|---|---|---|
+| JavaScript, WebAssembly, workers, storage, network, graphics, DOM / CSS | every check as on Apple's (WebGPU absent on both; SharedWorker passed on x86Sim, timed out in Apple's runs) | same | webcov, 2026-11-24 |
+| `<video>` / `<audio>` | the first AVFoundation-backed media load of a session plays; later ones hang before `loadedmetadata` (Darling has no POSIX AIO: `aio_write` from MediaToolbox's byte cache). VP9 WebM, MSE / ManagedMediaSource, WebCodecs, Web Audio decoding work | gap | webcov + LLDB on WebKit's GPU process, 2026-11-24 |
+| Permission prompts (microphone, location, motion), geolocation from `x86sim location`, clipboard, wake lock, Web Share, WebAuthn sheet, speech | work on x86Sim; Apple's side not compared (its website prompts were not answered by the Mac runner) | **unverified** | webcov x86Sim side, 2026-11-24 |
+| Speed | rendering at par (canvas 2D, requestAnimationFrame, WebGL ≈ 1.0x Apple's on the Mac mini, WebAssembly loop 1.1x); JavaScript and DOM 0.1-0.5x; geometric mean 0.37x | close | webcov perf checks, 2026-11-24 |
+
 ## For agents
 
 | Feature | x86Sim | Rating |
@@ -148,6 +164,7 @@ time) and Metal to Vulkan; a Mac with Apple silicon runs both natively. Measured
 11 s (Apple TV), 17 s (Apple Watch) and 14-17 s (Vision Pro). The first boot of a new runtime waits for
 pre-translation (once per runtime). An element snapshot takes 10-35 ms.
 
-No side-by-side benchmark against Apple's simulator on a Mac has been made: app CPU speed, frame rates and launch
-times relative to a Mac are **unverified**. Compute-heavy app code runs translated and is expected to be slower than
+Side by side with Apple's simulator on the Mac mini, only web content has been measured (webcov's perf checks in
+Safari, 2026-11-24: rendering about as fast, JavaScript and DOM at 0.1-0.5x, see [Web platform](#web-platform)); app
+CPU speed, frame rates and launch times relative to a Mac are otherwise **unverified**. Compute-heavy app code runs translated and is expected to be slower than
 on Apple silicon. `x86sim fidelity fast` draws a 3x iPhone at 2x with reduced effects for more frame rate on a weak GPU.

@@ -1,0 +1,11 @@
+{
+ "media.video.hevc": "media stack / Darling: only the first AVFoundation-backed media load of a GPU-process lifetime completes. The GPU process's CRABS byte cache (MediaToolbox crabsRebalanceWorkingSet) issues aio_write; Darling has no AIO syscalls (314-320: aio_return / aio_suspend / aio_cancel / aio_error / aio_read / aio_write / lio_listio -> ENOSYS, x86sim-unsupported.log: \"com.apple.WebKi … syscall 319\"), the cache never completes and every later asset waits in crabsEnsureInitialized / FigByteStreamFactoryCreateStreamFromURLWithOptions (LLDB bt all of com.apple.WebKit.GPU). Run alone, the first <video> (H.264) passes; VP9 WebM (WebKit's own parser) and MSE are unaffected.",
+ "media.video.requestVideoFrameCallback": "as media.video.hevc (AIO: the second AVFoundation load hangs)",
+ "media.audio.aac": "as media.video.hevc (AIO)",
+ "media.audio.opus-mp4": "as media.video.hevc (AIO)",
+ "media.audio.wav": "as media.video.hevc (AIO)",
+ "media.audio.unmuted-with-gesture": "as media.video.hevc (AIO)",
+ "media.fullscreen-video": "as media.video.hevc (AIO)",
+ "media.hls-native": "as media.video.hevc (AIO)",
+ "media.webaudio.media-element-source": "as media.video.hevc (AIO): the <audio> element never loads"
+}
