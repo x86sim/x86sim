@@ -6,6 +6,7 @@
 	path = external/metal2vulkan
 	url = git@github.com:x86sim/metal2vulkan.git
 	branch = x86sim
+	sync = merge
 [submodule "external/dynarmic"]
 	path = external/dynarmic
 	url = git@github.com:x86sim/dynarmic.git

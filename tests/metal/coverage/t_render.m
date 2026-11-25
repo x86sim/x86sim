@@ -627,3 +627,41 @@ MC_TEST(render, load_store_actions, "MTLRenderPassAttachmentDescriptor loadActio
 	MC_CHECK(mc_count_wrong_rgba8(t, RGBA(0, 0, 255, 255), 0) == 0, @"load lost the first pass: %08x", mc_texel_rgba8(t, 1, 1));
 	return MC_PASS;
 }
+
+MC_TEST(render, depth_plane_3d, "MTLRenderPassAttachmentDescriptor depthPlane") {
+	// a colour attachment renders one depth plane of a 3D texture; the level's other planes keep their texels
+	enum { W = 16, D = 4, PLANE = 2 };
+	MTLTextureDescriptor* td = [MTLTextureDescriptor new];
+	td.textureType = MTLTextureType3D; td.pixelFormat = MTLPixelFormatRGBA8Unorm;
+	td.width = W; td.height = W; td.depth = D;
+	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModeShared;
+	id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+	MC_NOTNIL(t, nil);
+	static uint32_t texels[W * W * D];
+	for (int i = 0; i < W * W * D; i++) texels[i] = RGBA(0, 0, 255, 255);
+	[t replaceRegion:MTLRegionMake3D(0, 0, 0, W, W, D) mipmapLevel:0 slice:0 withBytes:texels bytesPerRow:W * 4 bytesPerImage:W * W * 4];
+	NSError* err = nil;
+	id<MTLRenderPipelineState> ps = mc_rps(dev, SRC, @"vquad", @"color", MTLPixelFormatRGBA8Unorm, &err);
+	MC_NOTNIL(ps, err);
+	MTLRenderPassDescriptor* p = pass(t, MTLClearColorMake(0, 0, 0, 1));
+	p.colorAttachments[0].loadAction = MTLLoadActionLoad;
+	p.colorAttachments[0].depthPlane = PLANE;
+	id<MTLCommandBuffer> cb = [mc_queue(dev) commandBuffer];
+	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:p];
+	float red[4] = {1, 0, 0, 1};
+	[e setRenderPipelineState:ps];
+	[e setVertexBytes:red length:sizeof red atIndex:0];
+	[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	[e endEncoding];
+	NSString* s = mc_run(cb);
+	MC_CHECK(!s, @"%@", s);
+	memset(texels, 0, sizeof texels);
+	[t getBytes:texels bytesPerRow:W * 4 bytesPerImage:W * W * 4 fromRegion:MTLRegionMake3D(0, 0, 0, W, W, D) mipmapLevel:0 slice:0];
+	for (int z = 0; z < D; z++) {
+		uint32_t want = z == PLANE ? RGBA(255, 0, 0, 255) : RGBA(0, 0, 255, 255);
+		NSUInteger wrong = 0;
+		for (int i = 0; i < W * W; i++) wrong += texels[z * W * W + i] != want;
+		MC_CHECK(wrong == 0, @"plane %d: %lu texels wrong, first %08x (want %08x)", z, (unsigned long)wrong, texels[z * W * W], want);
+	}
+	return MC_PASS;
+}

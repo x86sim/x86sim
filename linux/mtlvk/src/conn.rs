@@ -1936,7 +1936,7 @@ impl State {
         LAST_PASS_IDS.with(|v| v.borrow_mut().clear());
         let mut pass = RenderPassDescriptor::default();
         let mut resolves: Vec<(Option<Texture>, u32, u32)> = Vec::new();
-        let mut att = |c: &mut Rd| -> Res<(Option<Texture>, u32, u32, u32, u32, [f64; 4])> {
+        let mut att = |c: &mut Rd| -> Res<(Option<Texture>, u32, u32, u32, u32, u32, [f64; 4])> {
             let t = c.u64();
             let (level, slice, plane, load, store, _pad) = (c.u32(), c.u32(), c.u32(), c.u32(), c.u32(), c.u32());
             let clear = [c.f64(), c.f64(), c.f64(), c.f64()];
@@ -1951,9 +1951,7 @@ impl State {
             self.mark(rt);
             let tex = if t == 0 { None } else { Some(self.tex(t)?.clone()) };
             resolves.push((if rt == 0 { None } else { Some(self.tex(rt)?.clone()) }, rl, rs));
-            // a 3D texture's depth plane: the runtime renders no 3D texture, and takes the slice for an array's layer
-            let slice = if plane != 0 && slice == 0 { plane } else { slice };
-            Ok((tex, level, slice, load, store, clear))
+            Ok((tex, level, slice, plane, load, store, clear))
         };
         let mut colors = Vec::new();
         for _ in 0..MAX_COLOR {
@@ -1961,7 +1959,7 @@ impl State {
         }
         let depth = att(c)?;
         let stencil = att(c)?;
-        for (i, (tex, level, slice, load, store, clear)) in colors.into_iter().enumerate() {
+        for (i, (tex, level, slice, plane, load, store, clear)) in colors.into_iter().enumerate() {
             if tex.is_none() || i >= pass.color_attachments.len() {
                 continue;
             }
@@ -1969,12 +1967,14 @@ impl State {
             a.texture = tex;
             a.level = level;
             a.slice = slice;
+            // a 3D texture's depth plane, rendered through a 2D view of that plane (read of no other type)
+            a.depth_plane = plane;
             a.load_action = load_action(load)?;
             a.store_action = store_action(store)?;
             a.clear_color = ClearColor::new(clear[0], clear[1], clear[2], clear[3]);
             (a.resolve_texture, a.resolve_level, a.resolve_slice) = resolves[i].clone();
         }
-        let (tex, level, slice, load, store, clear) = depth;
+        let (tex, level, slice, _plane, load, store, clear) = depth;
         if tex.is_some() {
             let a = &mut pass.depth_attachment;
             a.texture = tex;
@@ -1985,7 +1985,7 @@ impl State {
             a.clear_depth = clear[0];
             (a.resolve_texture, a.resolve_level, a.resolve_slice) = resolves[MAX_COLOR].clone();
         }
-        let (tex, level, slice, load, store, clear) = stencil;
+        let (tex, level, slice, _plane, load, store, clear) = stencil;
         if tex.is_some() {
             let a = &mut pass.stencil_attachment;
             a.texture = tex;
