@@ -742,6 +742,8 @@ above work. These are the known gaps:
 - **Pairing** an Apple Watch with an iPhone is not supported.
 - **Networking**: ordinary DNS and sockets work; Bonjour works between apps on one device but not with the network
   (no multicast DNS on the host).
+- **Web media**: in Safari and web views only the first `<video>` / `<audio>` load of a session plays (missing POSIX
+  AIO in Darling); see the web platform report, [tests/web/webcov/COVERAGE.md](tests/web/webcov/COVERAGE.md).
 - **Sandboxing**: simulator processes are not sandboxed.
 - **System logging**: `logd` runs for installed apps only; the runtime's own processes do not log. `x86sim log stream`
   covers one app or process at a time.
