@@ -1549,10 +1549,15 @@ extern "C" __attribute__((visibility("default"))) int a64_host_main(int argc, ch
         if (!s.compare(0, 22, "DYLD_SHARED_CACHE_DIR=")) cache_dir = s.substr(22);
         genv.push_back(strdup(s.c_str()));
     }
-    // 2026-11-03 defaults: JavaScriptCore without its FTL tier (JSC_useFTLJIT=false) unless the guest env sets it.
-    // FTL's B3 compiles run translated and cost more than they win here: JS bench 2.06-2.10 s vs 2.53-2.58 s with
-    // FTL (DFG off as well: 4.28 s; no JIT: 6.6 s); page loads unchanged. X86SIM_A64_JSC_FTL=1 keeps JSC's default.
-    if (!(getenv("X86SIM_A64_JSC_FTL") && atoi(getenv("X86SIM_A64_JSC_FTL")) == 1) &&
+    // JavaScriptCore keeps its FTL tier (JSC's default, as in Apple's simulator). From 2026-11-03 to 2026-11-24 every
+    // guest got JSC_useFTLJIT=false, as a short JS bench lost 20% with FTL. Likely why: an AOT image trained without
+    // FTL has none of its B3/Air compiler, so every WebContent live-translated it (~73% of the JIT worklist threads'
+    // time, 2026-11-24, before the image was updated; ~33% of far fewer samples after). With FTL off, hot JS
+    // never left DFG code (the loop keeps its counter on the stack and re-checks bounds every iteration): webcov's
+    // typed-array / numeric loops ran at 0.08 / 0.15 of Apple's simulator, 0.21 / 0.41 with FTL; a short mixed script
+    // (first runs and steady state) is equal either way once `x86sim-aot update` has the compiler from FTL-on
+    // WebContent runs in the image. X86SIM_A64_JSC_FTL=0: JSC_useFTLJIT=false again (a guest JSC_useFTLJIT=... wins).
+    if (getenv("X86SIM_A64_JSC_FTL") && atoi(getenv("X86SIM_A64_JSC_FTL")) == 0 &&
         std::none_of(genv.begin(), genv.end(), [](const char *v) { return !strncmp(v, "JSC_useFTLJIT=", 14); }))
         genv.push_back(strdup("JSC_useFTLJIT=false"));
     if (root.empty()) die("DYLD_ROOT_PATH is not set (the arm64 simulator runtime root)");

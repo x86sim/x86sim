@@ -25,6 +25,11 @@ query + style 0.50, JS numeric 0.14, float math 0.10, typed arrays 0.08, JSON 0.
 JIT output is arm64 code that the translator runs on x86-64, while the WebAssembly loop and the GPU paths are not
 bound by it. Single runs; host load moves them ±10%.
 
+Since this run (2026-11-24) JavaScriptCore has its FTL tier again (the translator had set `JSC_useFTLJIT=false` for
+every guest, so hot JS stayed in DFG code): means of 4 interleaved boots each, FTL off -> on, as ratio to Apple: JS
+numeric 0.15 -> 0.41, typed arrays 0.08 -> 0.21, closures 0.52 -> 0.56, the rest unchanged (geometric mean of all 16:
+0.39 -> 0.44). Float math stays at 0.10: ~86% of it is `sin` / `log` in libsystem_m, translated arm64 code.
+
 ### The one x86Sim gap: media elements after the first
 
 Every gap is a `<video>` / `<audio>` element (H.264 / HEVC / AAC / WAV / Opus-in-MP4, native HLS, full screen,
