@@ -16,14 +16,35 @@
   ]
  },
  "counts": {
-  "same": 223,
-  "gap": 9,
-  "apple-also-fails": 3,
+  "same": 235,
+  "gap": 0,
+  "apple-also-fails": 0,
   "better": 1,
   "unverified": 9
  },
  "flaky": {
-  "x86": [],
+  "x86": [
+   "graphics.offscreen-webgl2-worker",
+   "graphics.webgl1.draw",
+   "graphics.webgl2.canvas-composited",
+   "graphics.webgl2.draw",
+   "graphics.webgl2.float-render-texture",
+   "graphics.webgl2.info",
+   "graphics.webgl2.texture-upload-video-image",
+   "media.audio.aac",
+   "media.audio.flac",
+   "media.audio.mp3",
+   "media.audio.opus-mp4",
+   "media.audio.unmuted-with-gesture",
+   "media.audio.wav",
+   "media.fullscreen-video",
+   "media.hls-native",
+   "media.picture-in-picture",
+   "media.video.hevc",
+   "media.video.requestVideoFrameCallback",
+   "media.webaudio.media-element-source",
+   "perf.webgl.draw-fps"
+  ],
   "apple": [
    "device.payment-request-applepay",
    "device.speech-synthesis-voices",
@@ -1710,21 +1731,21 @@
   },
   {
    "id": "media.audio.aac",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "2",
    "apple_detail": "2",
    "value_differs": false,
    "gesture": false,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.audio.flac",
-   "class": "apple-also-fails",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "FAIL",
    "apple": "FAIL",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "Error: currentTime stuck at 0.000221333",
    "apple_detail": "Error: currentTime stuck at 0.000445292",
    "value_differs": false,
    "gesture": false,
@@ -1732,10 +1753,10 @@
   },
   {
    "id": "media.audio.mp3",
-   "class": "apple-also-fails",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "FAIL",
    "apple": "FAIL",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "Error: currentTime stuck at 0.000837584",
    "apple_detail": "Error: currentTime stuck at 0.00063875",
    "value_differs": false,
    "gesture": false,
@@ -1743,14 +1764,14 @@
   },
   {
    "id": "media.audio.opus-mp4",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "2",
    "apple_detail": "2",
    "value_differs": false,
    "gesture": false,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.audio.opus-webm",
@@ -1765,25 +1786,25 @@
   },
   {
    "id": "media.audio.unmuted-with-gesture",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: 12000 ms",
+   "x86_detail": "",
    "apple_detail": "",
    "value_differs": false,
    "gesture": true,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.audio.wav",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "2",
    "apple_detail": "2",
    "value_differs": false,
    "gesture": false,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.canPlayType",
@@ -1831,14 +1852,14 @@
   },
   {
    "id": "media.fullscreen-video",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "",
    "apple_detail": "",
    "value_differs": false,
    "gesture": true,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.getdisplaymedia",
@@ -1875,14 +1896,14 @@
   },
   {
    "id": "media.hls-native",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "2",
    "apple_detail": "2",
    "value_differs": false,
    "gesture": false,
-   "note": "as media.video.hevc (AIO)"
+   "note": ""
   },
   {
    "id": "media.media-session",
@@ -1941,10 +1962,10 @@
   },
   {
    "id": "media.picture-in-picture",
-   "class": "apple-also-fails",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "UNSUPPORTED",
    "apple": "UNSUPPORTED",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "Error: no PiP",
    "apple_detail": "Error: no PiP",
    "value_differs": false,
    "gesture": true,
@@ -1974,25 +1995,25 @@
   },
   {
    "id": "media.video.hevc",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "[320, 240, 2]",
    "apple_detail": "[320, 240, 2]",
    "value_differs": false,
    "gesture": false,
-   "note": "media stack / Darling: only the first AVFoundation-backed media load of a GPU-process lifetime completes. The GPU process's CRABS byte cache (MediaToolbox crabsRebalanceWorkingSet) issues aio_write; Darling has no AIO syscalls (314-320: aio_return / aio_suspend / aio_cancel / aio_error / aio_read / aio_write / lio_listio -> ENOSYS, x86sim-unsupported.log: \"com.apple.WebKi … syscall 319\"), the cache never completes and every later asset waits in crabsEnsureInitialized / FigByteStreamFactoryCreateStreamFromURLWithOptions (LLDB bt all of com.apple.WebKit.GPU). Run alone, the first <video> (H.264) passes; VP9 WebM (WebKit's own parser) and MSE are unaffected."
+   "note": ""
   },
   {
    "id": "media.video.requestVideoFrameCallback",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: loadedmetadata",
+   "x86_detail": "[320, 240]",
    "apple_detail": "[320, 240]",
    "value_differs": false,
    "gesture": false,
-   "note": "as media.video.hevc (AIO: the second AVFoundation load hangs)"
+   "note": ""
   },
   {
    "id": "media.video.vp9",
@@ -2084,14 +2105,14 @@
   },
   {
    "id": "media.webaudio.media-element-source",
-   "class": "gap",
-   "x86": "TIMEOUT",
+   "class": "same",
+   "x86": "PASS",
    "apple": "PASS",
-   "x86_detail": "Error: timeout: 8000 ms",
+   "x86_detail": "0.13",
    "apple_detail": "0.13",
    "value_differs": false,
    "gesture": true,
-   "note": "as media.video.hevc (AIO): the <audio> element never loads"
+   "note": ""
   },
   {
    "id": "media.webaudio.offline-render",

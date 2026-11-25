@@ -119,8 +119,8 @@ benchmarks. Full table, diagnosis and perf ratios: [tests/web/webcov/COVERAGE.md
 
 | Area | x86Sim | Rating | Verified |
 |---|---|---|---|
-| JavaScript, WebAssembly, workers, storage, network, graphics, DOM / CSS | every check as on Apple's (WebGPU absent on both; SharedWorker passed on x86Sim, timed out in Apple's runs) | same | webcov, 2026-11-24 |
-| `<video>` / `<audio>` | the first AVFoundation-backed media load of a session plays; later ones hang before `loadedmetadata` (Darling has no POSIX AIO: `aio_write` from MediaToolbox's byte cache). VP9 WebM, MSE / ManagedMediaSource, WebCodecs, Web Audio decoding work | gap | webcov + LLDB on WebKit's GPU process, 2026-11-24 |
+| JavaScript, WebAssembly, workers, storage, network, graphics, DOM / CSS | every check as on Apple's (WebGPU absent on both; SharedWorker passed on x86Sim, timed out in Apple's runs). Open: WebGL found no context on a newly created device in a later run, with or without the AIO change (COVERAGE.md) | same | webcov, 2026-11-24 |
+| `<video>` / `<audio>` | every media check as on Apple's, any number per session (H.264 / HEVC / AAC / WAV / Opus-in-MP4, native HLS, full screen, requestVideoFrameCallback, MediaElementSource; VP9 WebM, MSE / ManagedMediaSource, WebCodecs, Web Audio decoding). MediaToolbox's byte cache uses POSIX AIO, which Darling now implements (macOS 27's limits and errors) | same | webcov + `tests/arm64/aioprobe.c` (also on the Mac), 2026-11-24 |
 | Permission prompts (microphone, location, motion), geolocation from `x86sim location`, clipboard, wake lock, Web Share, WebAuthn sheet, speech | work on x86Sim; Apple's side not compared (its website prompts were not answered by the Mac runner) | **unverified** | webcov x86Sim side, 2026-11-24 |
 | Speed | rendering at par (canvas 2D, requestAnimationFrame, WebGL ≈ 1.0x Apple's on the Mac mini, WebAssembly loop 1.1x); JavaScript and DOM 0.1-0.5x; geometric mean 0.37x | close | webcov perf checks, 2026-11-24 |
 

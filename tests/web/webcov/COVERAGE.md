@@ -5,17 +5,17 @@ What web-platform features work in Safari on an x86Sim iPhone, compared with Saf
 [checks/](checks/), each with expected values (pixels read back, decoded audio's zero crossings, round-tripped
 data), not just "the API exists". Machine-readable: [coverage.json](coverage.json).
 
-Run 2026-11-24: x86Sim `r3w-iphone` (one clean full run), Apple: three runs on the Mac mini (a full one, then
-`device` / `media.getusermedia` / `workers` and the gesture checks again; per check the best Apple result counts, so
-an Apple-side flake is not credited to x86Sim).
+Runs 2026-11-24: x86Sim `r3w-iphone` (a full run) and, after Darling's POSIX AIO (below), `aio-iphone` (a full run);
+Apple: three runs on the Mac mini (a full one, then `device` / `media.getusermedia` / `workers` and the gesture checks
+again). Per check the best result of a side counts, so a flake is not credited to either side.
 
 ## Summary
 
 | class | count | meaning |
 |---|---|---|
-| same | 223 | same status on both (PASS, or the same UNSUPPORTED / FAIL) |
-| gap | 9 | Apple PASS, x86Sim not: **all one cause** (below) |
-| apple-also-fails | 3 | neither passes, differently (MP3 / FLAC `<audio>` stall at 0 s on Apple; PiP) |
+| same | 235 | same status on both (PASS, or the same UNSUPPORTED / FAIL) |
+| gap | 0 | Apple PASS, x86Sim not (the 9 media gaps of the first run: fixed, below) |
+| apple-also-fails | 0 | |
 | better | 1 | `workers.shared` passes on x86Sim; timed out in both Apple runs that reached it |
 | unverified | 9 | permission / gesture checks Apple's side never answered (the Mac runner's taps don't reach Safari's website prompts) |
 
@@ -25,28 +25,24 @@ query + style 0.50, JS numeric 0.14, float math 0.10, typed arrays 0.08, JSON 0.
 JIT output is arm64 code that the translator runs on x86-64, while the WebAssembly loop and the GPU paths are not
 bound by it. Single runs; host load moves them ±10%.
 
-### The one x86Sim gap: media elements after the first
+### Fixed: media elements after the first (Darling POSIX AIO)
 
-Every gap is a `<video>` / `<audio>` element (H.264 / HEVC / AAC / WAV / Opus-in-MP4, native HLS, full screen,
-requestVideoFrameCallback, MediaElementSource) that never reaches `loadedmetadata`. Only the **first**
-AVFoundation-backed load in a WebKit GPU process works (`media.video.h264` passes because it is the first in the
-suite; in every short run the first load played and the next one hung); VP9 WebM (WebKit's own parser), MSE / ManagedMediaSource,
-WebCodecs and `decodeAudioData` are unaffected. Layer: **Darling** (system calls), seen in the media stack.
+In the first run 9 checks were gaps, all `<video>` / `<audio>` elements (HEVC, AAC, WAV, Opus-in-MP4, native HLS,
+full screen, requestVideoFrameCallback, MediaElementSource, unmuted with a gesture) that never reached
+`loadedmetadata`: only the **first** AVFoundation-backed load of a WebKit GPU process worked. `bt all` of
+`com.apple.WebKit.GPU` showed the first asset's thread in `FigAIOIssueWrite` (MediaToolbox's CRABS byte cache writing
+its backing store with `aio_write`) and every later asset waiting behind it; Darling implemented none of the AIO
+system calls (ENOSYS, `syscall 319` in the device's `x86sim-unsupported.log`).
 
-Evidence: `bt all` of `com.apple.WebKit.GPU` during the hang (`x86sim debug <phone> <pid> --batch -o "bt all"`):
-the first asset's thread sits in `FigAIOIssueWrite` called by `crabsRebalanceWorkingSet` (MediaToolbox's CRABS
-byte cache writing its backing store with POSIX AIO), the next asset in `crabsEnsureInitialized`, the ones after
-it in `FigByteStreamFactoryCreateStreamFromURLWithOptions`. The phone's `private/var/run/x86sim-unsupported.log`
-has `com.apple.WebKi … syscall 319` (`aio_write`): Darling implements none of the AIO system calls (314-320:
-`aio_return`, `aio_suspend`, `aio_cancel`, `aio_error`, `aio_read`, `aio_write`, `lio_listio` -> ENOSYS), so the
-write never completes and (as the stacks show) the cache never lets the next asset initialize.
+Darling's `libsystem_kernel` now has them (`aio_read` / `aio_write` / `aio_fsync` / `aio_error` / `aio_return` /
+`aio_suspend` / `aio_cancel` / `lio_listio`): each request completes when it is submitted and its result waits for
+`aio_error` / `aio_return`; limits and errors are macOS 27's (`tests/arm64/aioprobe.c`, 58 checks, the same on the Mac
+and on x86Sim). All 9 checks pass now, and the media checks run in one session as on Apple
+(`media.audio.flac` / `.mp3` stall at 0 s on both; PiP is unsupported on both).
 
-Fix (not made this round: Darling's `libsystem_kernel` is installed into the shared prefix by every boot):
-synchronous AIO in Darling's BSD syscall table (`bsd_syscall_table.c` 314-320): `aio_read` / `aio_write` do the
-`pread` / `pwrite` at submission and keep the result per aiocb, `aio_error` answers 0 / the errno, `aio_return`
-the byte count (once), `aio_suspend` returns at once (every request is complete), `aio_cancel` answers
-`AIO_ALLDONE`, `lio_listio` runs the list; `SIGEV_SIGNAL` completion raises the signal after the I/O. This is
-also the "video playback in Safari is broken" report: the first video of a Safari session plays, the rest don't.
+WebGL: in the second run (a newly created device) the WebGL checks failed (`shader: null`, no context) where the first
+run passed them; the same 6 fail with the old and the new `libsystem_kernel` (A/B, three boots), so this is not the AIO
+change. Their rows here are the first run's (best per check); open.
 
 ### Notes on other results (same on both)
 
@@ -83,9 +79,9 @@ browser outside a memory-capped scope (`systemd-run --user --scope -p MemoryMax=
 
 | | count |
 |---|---|
-| same | 223 |
-| gap | 9 |
-| apple-also-fails | 3 |
+| same | 235 |
+| gap | 0 |
+| apple-also-fails | 0 |
 | better | 1 |
 | unverified | 9 |
 
@@ -93,15 +89,6 @@ browser outside a memory-capped scope (`systemd-run --user --scope -p MemoryMax=
 
 | check | x86Sim | detail | diagnosis |
 |---|---|---|---|
-| `media.audio.aac` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO) |
-| `media.audio.opus-mp4` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO) |
-| `media.audio.unmuted-with-gesture` | TIMEOUT | Error: timeout: 12000 ms | as media.video.hevc (AIO) |
-| `media.audio.wav` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO) |
-| `media.fullscreen-video` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO) |
-| `media.hls-native` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO) |
-| `media.video.hevc` | TIMEOUT | Error: timeout: loadedmetadata | media stack / Darling: only the first AVFoundation-backed media load of a GPU-process lifetime completes. The GPU process's CRABS byte cache (MediaToolbox crabsRebalanceWorkingSet) issues aio_write; Darling has no AIO syscalls (314-320: aio_return / aio_suspend / aio_cancel / aio_error / aio_read / aio_write / lio_listio -> ENOSYS, x86sim-unsupported.log: "com.apple.WebKi … syscall 319"), the cac… |
-| `media.video.requestVideoFrameCallback` | TIMEOUT | Error: timeout: loadedmetadata | as media.video.hevc (AIO: the second AVFoundation load hangs) |
-| `media.webaudio.media-element-source` | TIMEOUT | Error: timeout: 8000 ms | as media.video.hevc (AIO): the <audio> element never loads |
 
 ### Performance (higher is better; ratio = x86Sim / Apple)
 
@@ -281,32 +268,32 @@ browser outside a memory-capped scope (`systemd-run --user --scope -p MemoryMax=
 | `js.wasm.tail-call` | PASS | PASS | same | 3 | 3 |
 | `js.wasm.threads-shared-memory` | PASS | PASS | same | [0, 5] | [0, 5] |
 | `js.weakref-finalization` | PASS | PASS | same | "object" | "object" |
-| `media.audio.aac` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | 2 |
-| `media.audio.flac` | TIMEOUT | FAIL | apple-also-fails | Error: timeout: loadedmetadata | Error: currentTime stuck at 0.000445292 |
-| `media.audio.mp3` | TIMEOUT | FAIL | apple-also-fails | Error: timeout: loadedmetadata | Error: currentTime stuck at 0.00063875 |
-| `media.audio.opus-mp4` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | 2 |
+| `media.audio.aac` | PASS | PASS | same | 2 | 2 |
+| `media.audio.flac` | FAIL | FAIL | same | Error: currentTime stuck at 0.000221333 | Error: currentTime stuck at 0.000445292 |
+| `media.audio.mp3` | FAIL | FAIL | same | Error: currentTime stuck at 0.000837584 | Error: currentTime stuck at 0.00063875 |
+| `media.audio.opus-mp4` | PASS | PASS | same | 2 | 2 |
 | `media.audio.opus-webm` | PASS | PASS | same | 2 | 2 |
-| `media.audio.unmuted-with-gesture` (tap) | TIMEOUT | PASS | gap | Error: timeout: 12000 ms |  |
-| `media.audio.wav` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | 2 |
+| `media.audio.unmuted-with-gesture` (tap) | PASS | PASS | same |  |  |
+| `media.audio.wav` | PASS | PASS | same | 2 | 2 |
 | `media.canPlayType` | PASS | PASS | same | {"video/mp4; codecs=\"avc1.4d401e\"": "probably", "video/mp4; codecs=\"hvc1.1.6.L93.B0\""… | {"video/mp4; codecs=\"avc1.4d401e\"": "probably", "video/mp4; codecs=\"hvc1.1.6.L93.B0\""… |
 | `media.eme-clearkey` | PASS | PASS | same |  |  |
 | `media.eme-fairplay` | PASS | PASS | same | "com.apple.fps" | "com.apple.fps" |
 | `media.enumerate-devices` | PASS | PASS | same | ["audioinput"] | ["audioinput"] |
-| `media.fullscreen-video` (tap) | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata |  |
+| `media.fullscreen-video` (tap) | PASS | PASS | same |  |  |
 | `media.getdisplaymedia` | PASS | PASS | same |  |  |
 | `media.getusermedia-camera` (tap) | FAIL | FAIL | same | OverconstrainedError: Invalid constraint | OverconstrainedError: Invalid constraint |
 | `media.getusermedia-mic` (tap) | PASS | TIMEOUT | unverified | {"label": "MicrophoneBuiltIn", "state": "ended", "peak": 0} | Error: timeout: 30000 ms |
-| `media.hls-native` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | 2 |
+| `media.hls-native` | PASS | PASS | same | 2 | 2 |
 | `media.media-session` | PASS | PASS | same | "webcov" | "webcov" |
 | `media.mediacapabilities` | PASS | PASS | same | {"supported": true, "smooth": false, "powerEfficient": false} | {"supported": true, "smooth": false, "powerEfficient": false} |
 | `media.mediarecorder-canvas` | PASS | PASS | same | "video/mp4" | "video/mp4" |
 | `media.mse.managed-media-source` | PASS | PASS | same | [1, 2] | [1, 2] |
 | `media.mse.media-source` | UNSUPPORTED | UNSUPPORTED | same | Error: no MediaSource | Error: no MediaSource |
-| `media.picture-in-picture` (tap) | TIMEOUT | UNSUPPORTED | apple-also-fails | Error: timeout: loadedmetadata | Error: no PiP |
+| `media.picture-in-picture` (tap) | UNSUPPORTED | UNSUPPORTED | same | Error: no PiP | Error: no PiP |
 | `media.remote-playback-airplay` | PASS | PASS | same | {"remote": true, "airplay": true, "availability": true} | {"remote": true, "airplay": true, "availability": true} |
 | `media.video.h264` | PASS | PASS | same | [320, 240, 2] | [320, 240, 2] |
-| `media.video.hevc` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | [320, 240, 2] |
-| `media.video.requestVideoFrameCallback` | TIMEOUT | PASS | gap | Error: timeout: loadedmetadata | [320, 240] |
+| `media.video.hevc` | PASS | PASS | same | [320, 240, 2] | [320, 240, 2] |
+| `media.video.requestVideoFrameCallback` | PASS | PASS | same | [320, 240] | [320, 240] |
 | `media.video.vp9` | PASS | PASS | same | [320, 240, 2] | [320, 240, 2] |
 | `media.webaudio.analyser-convolver-panner` | PASS | PASS | same |  |  |
 | `media.webaudio.audioworklet` | PASS | PASS | same | 0.25 | 0.25 |
@@ -315,7 +302,7 @@ browser outside a memory-capped scope (`systemd-run --user --scope -p MemoryMax=
 | `media.webaudio.decode.mp3` | PASS | PASS | same | [48000, 1] | [48000, 1] |
 | `media.webaudio.decode.opus` | PASS | PASS | same | [48000, 1] | [48000, 1] |
 | `media.webaudio.decode.wav` | PASS | PASS | same | [48000, 1] | [48000, 1] |
-| `media.webaudio.media-element-source` (tap) | TIMEOUT | PASS | gap | Error: timeout: 8000 ms | 0.13 |
+| `media.webaudio.media-element-source` (tap) | PASS | PASS | same | 0.13 | 0.13 |
 | `media.webaudio.offline-render` | PASS | PASS | same |  |  |
 | `media.webaudio.realtime-running` (tap) | PASS | PASS | same (values differ) | {"state": "running", "advanced": 0.55, "rate": 48000, "latency": 0.0026666666666666666} | {"state": "running", "advanced": 0.58, "rate": 48000, "latency": 0.0026666666666666666} |
 | `media.webcodecs.audio-encode` | PASS | PASS | same | {"opus": 51, "mp4a.40.2": 49} | {"opus": 51, "mp4a.40.2": 49} |
