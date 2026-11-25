@@ -25,6 +25,11 @@ query + style 0.50, JS numeric 0.14, float math 0.10, typed arrays 0.08, JSON 0.
 JIT output is arm64 code that the translator runs on x86-64, while the WebAssembly loop and the GPU paths are not
 bound by it. Single runs; host load moves them ±10%.
 
+Since this run (2026-11-24) JavaScriptCore has its FTL tier again (the translator had set `JSC_useFTLJIT=false` for
+every guest, so hot JS stayed in DFG code): means of 4 interleaved boots each, FTL off -> on, as ratio to Apple: JS
+numeric 0.15 -> 0.41, typed arrays 0.08 -> 0.21, closures 0.52 -> 0.56, the rest unchanged (geometric mean of all 16:
+0.39 -> 0.44). Float math stays at 0.10: ~86% of it is `sin` / `log` in libsystem_m, translated arm64 code.
+
 ### Fixed: media elements after the first (Darling POSIX AIO)
 
 In the first run 9 checks were gaps, all `<video>` / `<audio>` elements (HEVC, AAC, WAV, Opus-in-MP4, native HLS,
@@ -40,9 +45,10 @@ Darling's `libsystem_kernel` now has them (`aio_read` / `aio_write` / `aio_fsync
 and on x86Sim). All 9 checks pass now, and the media checks run in one session as on Apple
 (`media.audio.flac` / `.mp3` stall at 0 s on both; PiP is unsupported on both).
 
-WebGL: in the second run (a newly created device) the WebGL checks failed (`shader: null`, no context) where the first
-run passed them; the same 6 fail with the old and the new `libsystem_kernel` (A/B, three boots), so this is not the AIO
-change. Their rows here are the first run's (best per check); open.
+WebGL: in the second run the WebGL checks failed (`shader: null`, no context) because that device was booted by
+hand through `boot-a64.sh`, which leaves Metal off on iPhone / iPad unless `X86SIM_METAL` is set; ANGLE then has no
+Metal device. Booted through the launcher / MCP `sim_start` (Metal on) every WebGL check passes as in the first run.
+`run.sh` now records the phone's Metal mode in `OUT/metal.txt` and warns when it is off.
 
 ### Notes on other results (same on both)
 
