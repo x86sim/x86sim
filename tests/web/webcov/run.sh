@@ -122,6 +122,21 @@ try:
 	d = json.load(sys.stdin); s = d.get("screen") or {}; print(s.get("width", 0), s.get("height", 0))
 except Exception: print(0, 0)')
 [ "${PW:-0}" = 0 ] && { PW=402; PH=874; }
+# the phone's Metal: Safari's WebGL is ANGLE on Metal in the WebKit GPU process. A phone booted with software rendering
+# has no MTLDevice and every WebGL check fails (createShader null, getSupportedExtensions null, black texture reads) --
+# boot-a64.sh started by hand defaults iPhone/iPad to X86SIM_METAL=0 (the launcher / MCP sim_start boot with "all").
+# Read from the phone's darlingserver (cmdline "darlingserver <its prefix> ...", environment from boot-a64.sh).
+metal=$(for p in /proc/[0-9]*; do
+	[ "$(cat "$p/comm" 2>/dev/null)" = darlingserver ] || continue
+	tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q "darlingserver $X86SIM_SCRATCH/a64prefix-$phone " || continue
+	tr '\0' '\n' < "$p/environ" 2>/dev/null | sed -n 's/^X86SIM_METAL=//p'; break
+done)
+echo "$phone: X86SIM_METAL=${metal:-?}" > "$OUT/metal.txt"
+case ${metal:-?} in
+0) echo "webcov: WARNING: $phone renders in software (X86SIM_METAL=0): WebGL checks will fail; boot it" \
+	"with X86SIM_METAL=all (the launcher's default)" | tee -a "$OUT/metal.txt" >&2 ;;
+\?) echo "  note: $phone's Metal mode unknown (no darlingserver for $X86SIM_SCRATCH/a64prefix-$phone)" ;;
+esac
 url="http://127.0.0.1:$PORT/?$QS"
 echo "webcov on $phone: $url -> $J"
 xs open "$url" --after none >/dev/null 2>&1
@@ -171,4 +186,5 @@ echo
 xs screenshot "$OUT/screen.png" 2 >/dev/null 2>&1
 cp "$J" "$OUT/" 2>/dev/null
 python3 "$W/report.py" "$J" | tee "$OUT/report.md" | head -20
+[ "$metal" = 0 ] && sed -n 2p "$OUT/metal.txt" | tee -a "$OUT/report.md" >&2
 echo "results: $OUT/$RUN.jsonl"
