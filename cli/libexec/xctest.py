@@ -27,7 +27,7 @@ when one failed, 2 when nothing could run.
 """
 import atexit, fcntl
 import glob, hashlib, tempfile
-import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, time, uuid
+import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, threading, time, urllib.parse, uuid
 import xml.etree.ElementTree as ET
 from plistlib import UID
 
@@ -56,6 +56,39 @@ Options:
   --result-bundle B.xcresult
                           also write an Xcode result bundle (what xcodebuild -resultBundlePath writes; xcresulttool,
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
+  --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
+                          result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
+  --also-on PHONE         run the same tests on another device too (repeatable: xcodebuild test with several
+                          -destination); the devices test at the same time, as xcodebuild's destinations; one result
+                          bundle with an action per device
+  --record-baselines      set the performance tests' baselines from this run (Xcode's "Set Baseline"): each
+                          metric's average into the project's xcshareddata/xcbaselines, for this machine and device
+                          (the next build copies them into the test bundle; later runs compare with them)
+  --baselines-project P.xcodeproj
+                          the project for --record-baselines (default: the .xctestrun's source root and container)
+  --parallel-testing[=YES|NO], --parallel-workers N
+                          split each target's classes over N worker processes (xcodebuild -parallel-testing-enabled,
+                          -parallel-testing-worker-count; default 2; the .xctestrun's ParallelizationEnabled turns it
+                          on): logic tests run at once, tests hosted in an app one worker after another
+  --serial-destinations   one device after another (xcodebuild -disable-concurrent-destination-testing)
+  --max-concurrent-destinations N
+                          at most N at once (default 4: xcodebuild -maximum-concurrent-test-simulator-destinations)
+  --only-test-configuration NAME, --skip-test-configuration NAME
+                          a test plan's configurations to run / leave out (an .xctestrun of a test plan holds
+                          one set of targets per configuration; each runs)
+  --test-iterations N     run each test N times (xcodebuild -test-iterations; with the two below, their maximum)
+  --retry-tests-on-failure
+                          run a failed test again, up to 3 times (or --test-iterations): it passes when a run passes
+  --run-tests-until-failure
+                          run each test until it fails, up to 100 times (or --test-iterations)
+  --test-repetition-relaunch
+                          each repetition a new test process (xcodebuild -test-repetition-relaunch-enabled YES)
+  --test-timeouts-enabled YES|NO, --default-test-execution-time-allowance S, --maximum-test-execution-time-allowance S
+                          XCTest's per-test time limits (xcodebuild's options of those names)
+  --built                 the products were built for this run (xcodebuild test, not test-without-building): the
+                          result bundle's build action succeeded instead of "not requested"
+  --build-log FILE        the same, with the build's log and issues (the xcodebuild stand-in's build-log.json); a
+                          failed build runs nothing and writes the result bundle Xcode writes then (testing cancelled)
   --json FILE, --junit FILE
                           also write the JSON summary / JUnit XML there ("-": JSON to stdout, nothing else printed)
   --timeout S             per test target (default 1800)
@@ -104,6 +137,14 @@ class URL:
         self.path = path
 
 
+class Num(int):
+    """An NSNumber archived as an object (encodeObject:), not inline"""
+
+
+class MutableDict(dict):
+    """An NSMutableDictionary (XCTest's aggregateStatisticsBeforeCrash is one)"""
+
+
 class NSUUID:
     def __init__(self, u):
         self.u = u
@@ -123,14 +164,15 @@ def archive(root):
     def enc(v):
         if v is None:
             return UID(0)
-        if isinstance(v, (bool, int, float)):
+        if isinstance(v, (bool, int, float)) and not isinstance(v, Num):
             return v
         i = len(objs)
         objs.append(None)
-        if isinstance(v, str):
-            objs[i] = v
+        if isinstance(v, (str, Num)):
+            objs[i] = int(v) if isinstance(v, Num) else v
         elif isinstance(v, URL):
-            objs[i] = {"NS.base": UID(0), "NS.relative": enc("file://" + v.path), "$class": cls(["NSURL", "NSObject"])}
+            u = v.path if "://" in v.path else "file://" + v.path
+            objs[i] = {"NS.base": UID(0), "NS.relative": enc(u), "$class": cls(["NSURL", "NSObject"])}
         elif isinstance(v, NSUUID):
             objs[i] = {"NS.uuidbytes": uuid.UUID(v.u).bytes, "$class": cls(["NSUUID", "NSObject"])}
         elif isinstance(v, (list, tuple)):
@@ -140,7 +182,8 @@ def archive(root):
         elif isinstance(v, dict):
             ks = list(v)
             objs[i] = {"NS.keys": [enc(k) for k in ks], "NS.objects": [enc(v[k]) for k in ks],
-                       "$class": cls(["NSDictionary", "NSObject"])}
+                       "$class": cls(["NSMutableDictionary", "NSDictionary", "NSObject"] if isinstance(v, MutableDict)
+                                     else ["NSDictionary", "NSObject"])}
         elif isinstance(v, Obj):
             d = {k: (x if isinstance(x, bool) else enc(x)) for k, x in v.fields.items()}
             d["$class"] = cls(v.classes)
@@ -183,6 +226,16 @@ def test_identifiers(s, skip=False):
     return out
 
 
+def url_part(s):
+    return urllib.parse.quote(s, safe="()-._~!$&'*+,;=:@")
+
+
+def rel_bundle(bundle):
+    """testBundleRelativePath: a hosted bundle's path in its host app (PlugIns/<name>.xctest), None for a logic test's"""
+    m = re.search(r"\.app/(PlugIns/[^/]+\.xctest)/?$", bundle)
+    return m.group(1) if m else None
+
+
 def identifier_set(ids, skip=False):
     return Obj(["XCTTestIdentifierSet", "NSObject"], {"identifiers": [i for x in ids for i in test_identifiers(x, skip)]})
 
@@ -191,45 +244,202 @@ def identifier_set(ids, skip=False):
 INTEROP_MODES = {"none": 0, "limited": 1, "complete": 2, "strict": 3}
 
 
+# lines x86Sim's own pieces print in a test process's output (libsimshim, the translator, dyld_sim's note)
+X86SIM_LINE = re.compile(r"^(simshim: |arm64host: |a64: |DYLD_SHARED_REGION=avoid not supported for simulator$)")
+
+
+# an .xctestrun's SystemAttachmentLifetime / UserAttachmentLifetime as XCTestConfiguration has them (XCTAttachmentLifetime)
+LIFETIMES = {"keepAlways": 0, "deleteOnSuccess": 1, "keepNever": 2}
+
+
+# XCTRepetitionMode as Xcode 27.2 sets it (XCTestConfiguration.repetitionPolicy), and its name in a result bundle
+REPETITION = {"until": (1, 100, "RunUntilFailure"), "retry": (2, 3, "RunRetryOnFailure"), "fixed": (3, 1, "FixedIterations")}
+
+
+# ---- performance baselines (Xcode's xcbaselines: Swift Build copies <project>/xcshareddata/xcbaselines/<target>.xcbaseline
+# into the test bundle as xcbaselines/; a run destination is a machine and a device; Xcode matches them exactly)
+
+def host_record():
+    """This machine as a baseline's localComputer (Xcode's keys; Linux's facts: /proc/cpuinfo, the DMI product)"""
+    kind, cores, packages, physical = "", os.cpu_count() or 1, set(), None
+    try:
+        for ln in open("/proc/cpuinfo"):
+            k, _, v = ln.partition(":")
+            k, v = k.strip(), v.strip()
+            if k == "model name" and not kind:
+                kind = v
+            elif k == "physical id":
+                packages.add(v)
+            elif k == "cpu cores" and physical is None:
+                physical = int(v) if v.isdigit() else None
+    except OSError:
+        pass
+    try:
+        model = open("/sys/devices/virtual/dmi/id/product_name").read().strip()
+    except OSError:
+        model = ""
+    n = max(1, len(packages))
+    return {"busSpeedInMHz": 0, "cpuCount": n, "cpuKind": kind or platform_machine(), "cpuSpeedInMHz": 0,
+            "logicalCPUCoresPerPackage": cores // n, "modelCode": model or "Linux",
+            "physicalCPUCoresPerPackage": physical or cores // n, "platformIdentifier": "com.x86sim.platform.linux"}
+
+
+def platform_machine():
+    import platform
+    return platform.machine()
+
+
+def baseline_destination(device_code, platform_id):
+    return {"localComputer": host_record(), "targetArchitecture": "arm64",
+            "targetDevice": {"modelCode": device_code, "platformIdentifier": platform_id}}
+
+
+def baseline_for(bundle, device_code, platform_id):
+    """(relative path, the destination's UUID) of the bundle's baseline for this machine and device, None without one"""
+    try:
+        with open(os.path.join(bundle, "xcbaselines", "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    want = baseline_destination(device_code, platform_id)
+    for u, d in (info.get("runDestinationsByUUID") or {}).items():
+        if d == want and os.path.isfile(os.path.join(bundle, "xcbaselines", u + ".plist")):
+            return "xcbaselines/%s.plist" % u
+    return None
+
+
+def record_baselines(project, target, tests, device_code, platform_id):
+    """Xcode's "Set Baseline" for a target's performance tests: each metric's average into
+    <project>/xcshareddata/xcbaselines/<target GUID>.xcbaseline, for this machine and device. Returns the folder."""
+    try:
+        pbx = open(os.path.join(project, "project.pbxproj"), errors="replace").read()
+    except OSError:
+        return None
+    guid = None   # the target's id: its PBXNativeTarget block names it
+    for m in re.finditer(r"([0-9A-Fa-f]{24}) (?:/\*[^*]*\*/ )?= \{\s*isa = PBXNativeTarget;(.*?)\n\s*\};", pbx, re.S):
+        if re.search(r'\bname = "?%s"?;' % re.escape(target), m.group(2)):
+            guid = m.group(1)
+            break
+    if not guid:
+        return None
+    d = os.path.join(project, "xcshareddata", "xcbaselines", guid + ".xcbaseline")
+    os.makedirs(d, exist_ok=True)
+    try:
+        with open(os.path.join(d, "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        info = {}
+    dests = info.setdefault("runDestinationsByUUID", {})
+    want = baseline_destination(device_code, platform_id)
+    u = next((k for k, v in dests.items() if v == want), None)
+    if u is None:
+        u = str(uuid.uuid5(uuid.NAMESPACE_URL, "x86sim-baseline:" + json.dumps(want, sort_keys=True))).upper()
+        dests[u] = want
+    with open(os.path.join(d, "Info.plist"), "wb") as f:
+        plistlib.dump(info, f)
+    bp = os.path.join(d, u + ".plist")
+    try:
+        with open(bp, "rb") as f:
+            base = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        base = {}
+    classes = base.setdefault("classNames", {})
+    for t in tests:
+        for mt in t.get("metrics") or []:
+            vals = [float(v) for v in mt.get("values") or []]
+            if not vals:
+                continue
+            name = t["name"] if t["name"].endswith(")") else t["name"] + "()"
+            classes.setdefault(t["class"].split(".")[-1], {}).setdefault(name, {})[mt["id"]] = {
+                "baselineAverage": round(sum(vals) / len(vals), 6), "baselineIntegrationDisplayName": "Local Baseline"}
+    with open(bp, "wb") as f:
+        plistlib.dump(base, f)
+    return d
+
+
+def repetition(a):
+    """(XCTRepetitionMode, XCTMaximumIterations, result bundle name) of x86sim test's options, None for one run each"""
+    kind = "until" if a.get("until_failure") else "retry" if a.get("retry") else "fixed" if a.get("iterations") else None
+    if not kind:
+        return None
+    mode, default, name = REPETITION[kind]
+    return mode, a.get("iterations") or default, name
+
+
+def repetition_mode(a):
+    r = repetition(a)
+    return r[2] if r else None
+
+
 def configuration(bundle, module, target_path=None, target_bid=None, target_args=(), target_env=None, ui=False,
-                  only=None, skip=(), interop=2):
+                  only=None, skip=(), interop=2, t=None, scheme=None, opts=None, baseline=None):
+    """The XCTestConfiguration Xcode 27.2 hands a test process in `xcodebuild test-without-building` (read on the Mac
+    from XCTestConfiguration.activeTestConfiguration), less what only its IDE session has (reportResultsToIDE,
+    sessionIdentifier, IDECapabilities, testApplicationDependencies). t: the .xctestrun target (attachment
+    lifetimes); scheme: Runner.scheme_info() (the project's name and the scheme's products: crash report emphasis,
+    symbolication, the apps' bundle infos), None for none."""
+    t, scheme, opts = t or {}, scheme or {}, opts or {}
+    rep = repetition(opts)
+    to_run = identifier_set(only) if only else None
     sel = Obj(["XCTTestSelection", "NSObject"], {
-        "IdentifiersToRun": identifier_set(only) if only else None, "IdentifiersToSkip": identifier_set(skip, skip=True),
+        "IdentifiersToRun": to_run, "IdentifiersToSkip": identifier_set(skip, skip=True),
         "TagsToRun": None,
         "TagsToSkip": Obj(["XCTTagSelection", "NSObject"], {"XCTTagSelectionIncludeXCTests": False,
                                                           "XCTTagSelectionMode": 1, "XCTTagSelectionTagSet": set()})})
     f = {
-        "ApplicationBundleInfos": None, "EnablePerformanceTestsDiagnostics": None, "IDECapabilities": None,
-        "IsMemoryTaggingAddressSanitizerEnabled": False, "aggregateStatisticsBeforeCrash": None,
+        "ApplicationBundleInfos": scheme.get("bundle_infos") if ui else None,
+        "EnablePerformanceTestsDiagnostics": None, "IDECapabilities": None,
+        "IsMemoryTaggingAddressSanitizerEnabled": False,
+        "aggregateStatisticsBeforeCrash": MutableDict(XCSuiteRecordsKey=MutableDict()),
         "applicationCrashDetectionPolicy": Obj(["XCTApplicationCrashDetectionPolicy", "NSObject"],
                                                {"XCTApplicationCrashDetectionSeverity": 2}),
-        "automationFrameworkPath": None, "baseTestsURL": None, "baselineFileRelativePath": None, "baselineFileURL": None,
-        "bundleIDsForCrashReportEmphasis": None, "defaultTestExecutionTimeAllowance": None,
+        "automationFrameworkPath": scheme.get("automation"),
+        "baseTestsURL": URL("test://com.apple.xcode/%s/%s" % (url_part(scheme["project"]), url_part(module)))
+        if scheme.get("project") else None,
+        # a performance baseline for this machine and device (baseline_for(): the bundle's xcbaselines), as Xcode's
+        # harness hands it to XCTest
+        "baselineFileRelativePath": baseline[0] if baseline else None,
+        "baselineFileURL": URL(baseline[1]) if baseline else None,
+        "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"),
+        "defaultTestExecutionTimeAllowance":
+            Num(opts.get("default_allowance") or t.get("DefaultTestExecutionTimeAllowance") or 600),
         "deferSymbolicationToHarness": False, "disablePerformanceMetrics": False, "emitOSLogs": False, "formatVersion": 2,
         "gatherLocalizableStringsData": False,
         "hangDetectionPolicy": Obj(["XCTHangDetectionPolicy", "NSObject"],
                                    {"detectionEnabled": False, "durationThreshold": 1.0, "severity": 0}),
         "inProcessParallelizationEnabled": True, "initializeForMultiDevice": False, "initializeForUITesting": ui,
-        "leaksCheckingMode": 0, "maximumTestExecutionTimeAllowance": None, "multiDevicePlatformVersionMap": None,
+        "leaksCheckingMode": 0,
+        "maximumTestExecutionTimeAllowance": Num(opts.get("max_allowance") or t["MaximumTestExecutionTimeAllowance"])
+        if opts.get("max_allowance") or t.get("MaximumTestExecutionTimeAllowance") else None,
+        "multiDevicePlatformVersionMap": None,
         "multiDeviceRemoteRunnerPlatformMap": None, "multiDeviceRequirementsFilePath": None,
         "performanceTestConfiguration": None, "preferredScreenCaptureFormat": 1, "productModuleName": module,
         "randomExecutionOrderingSeed": None,
         "repetitionPolicy": Obj(["XCTRepetitionPolicy", "NSObject"],
-                                {"XCTMaximumIterations": 1, "XCTRepeatInNewRunnerProcess": False, "XCTRepetitionMode": 0}),
+                                {"XCTMaximumIterations": rep[1] if rep else 1,
+                                 "XCTRepeatInNewRunnerProcess": bool(rep and opts.get("relaunch")),
+                                 "XCTRepetitionMode": rep[0] if rep else 0}),
         # no IDE session: XCTest reports to its log only (reportResultsToIDE / sessionIdentifier unset)
         "reportActivities": True, "reportResultsToIDE": False, "resultChannelConfiguration": None,
         "runAsMultiDeviceRemoteRunner": False,
         "runtimeDiagnosticsPolicy": Obj(["XCTRuntimeDiagnosticsPolicy", "NSObject"], {}),
-        "sessionIdentifier": None, "shouldExtractMultiDeviceRequirements": False, "symbolicationImageNames": None,
-        "systemAttachmentLifetime": 1,   # deleteOnSuccess, as Xcode: failure screenshots are kept (#50)
+        "sessionIdentifier": None, "shouldExtractMultiDeviceRequirements": False,
+        "symbolicationImageNames": scheme.get("image_names"),
+        # deleteOnSuccess by default, as Xcode: failure screenshots are kept (#50)
+        "systemAttachmentLifetime": LIFETIMES.get(t.get("SystemAttachmentLifetime"), 1),
         "targetApplicationArguments": list(target_args) if target_path else None,
         "targetApplicationBundleID": target_bid,
         "targetApplicationEnvironment": dict(target_env or {}) if target_path else None,
-        "targetApplicationPath": target_path, "testApplicationDependencies": None, "testApplicationUserOverrides": None,
-        "testBundleRelativePath": None, "testBundleURL": URL(bundle), "testExecutionOrdering": 0,
-        "testInstructionsSet": None, "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": False,
-        "testsDrivenByIDE": False, "testsMustRunOnMainThread": False, "traceCollectionEnabled_v2": None,
-        "treatMissingBaselinesAsFailures": False, "userAttachmentLifetime": 0,
+        # testApplicationDependencies (Xcode: the scheme's apps by bundle id) is left out: with it, XCUIApplication has
+        # Xcode launch the app over the IDE session ("Failed to launch ... via Xcode: no connection to Xcode exists")
+        "targetApplicationPath": target_path, "testApplicationDependencies": None,
+        "testApplicationUserOverrides": None,
+        "testBundleRelativePath": rel_bundle(bundle), "testBundleURL": URL(bundle.rstrip("/") + "/"),
+        "testExecutionOrdering": 0, "testIdentifiersToRun": to_run, "testInstructionsSet": None,
+        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": bool(opts["timeouts"] if opts.get("timeouts") is not None else t.get("TestTimeoutsEnabled")),
+        "testsDrivenByIDE": False, "testsMustRunOnMainThread": ui, "traceCollectionEnabled_v2": None,
+        "treatMissingBaselinesAsFailures": False,
+        "userAttachmentLifetime": LIFETIMES.get(t.get("UserAttachmentLifetime"), 1),
     }
     return archive(Obj(["XCTestConfiguration", "NSObject"], f))
 
@@ -389,11 +599,16 @@ def load_xctestrun(path, products):
             for t in c.get("TestTargets", []):
                 t = dict(t)
                 t.setdefault("_name", t.get("BlueprintName") or t.get("ProductModuleName"))
-                t["_config"] = c.get("Name")
+                # a test plan's configuration (an .xctestrun without one names its only configuration as it likes:
+                # Swift Build's "Debug"; Xcode's run is then "Test Scheme Action")
+                t["_config"] = c.get("Name") if d.get("TestPlan") else None
                 targets.append(t)
     else:
         targets = [dict(v, _name=k) for k, v in d.items() if not k.startswith("__") and isinstance(v, dict)]
     targets.sort(key=lambda t: t.get("RunOrder", 0))
+    container = (meta.get("ContainerInfo") or d.get("ContainerInfo") or {}).get("ContainerName")
+    for t in targets:
+        t["_container"] = container or t.get("BlueprintProviderName")
     return root, targets
 
 
@@ -677,7 +892,7 @@ def selection(t, only, skip, names):
 # ---------------------------------------------------------------------------------------------------------------------
 # XCTest's log -> results
 
-R_CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started\.")
+R_CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started(?: \(Iteration (\d+) of (\d+)\))?\.")
 R_CASE_END = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped) \((\d+(?:\.\d+)?) seconds\)\.")
 R_FAIL = re.compile(r"^(.*?):(\d+): error: -\[(\S+) (\S+)\] : (.*)$")
 R_SKIP = re.compile(r"^(.*?):(\d+): -\[(\S+) (\S+)\] : Test skipped(?: - (.*))?$")
@@ -855,8 +1070,12 @@ def swift_testing_results(lines):
         now = st_seconds(ev.get("instant"))
         if k == "testStarted":
             t["_start"] = now
+            if d.get("time"):
+                t["started"] = round(d["time"], 6)   # wall clock (libsimswt's), where the result bundle places it
         elif k == "testCaseStarted" and case is not None:
             case["_start"] = now
+            if d.get("time"):
+                case["started"] = round(d["time"], 6)
         elif k == "testCaseEnded" and case is not None:
             case["result"] = "failed" if case["failures"] else "expected_failure" if case.get("expected_failures") else "passed"
             if case["_start"] is not None:
@@ -1216,6 +1435,8 @@ class Parser:
         m = R_CASE_START.match(l)
         if m:
             self.current = self.test(m.group(1), m.group(2))
+            if m.group(3):   # a repetition (-test-iterations, -retry-tests-on-failure, -run-tests-until-failure)
+                self.iteration(self.current, int(m.group(3)), int(m.group(4)))
             self.last_fail = None
             if self.on_start:
                 self.on_start(self.current)
@@ -1401,6 +1622,46 @@ class Parser:
             if t.pop("_xfail_hook", None) and t["result"] == "passed" and t["expected_failures"]:
                 t["result"] = "expected_failure"
 
+    PER_RUN = ("result", "duration", "failures", "expected_failures", "skip_message")
+
+    def iteration(self, t, k, total):
+        """Iteration k of a repeated test starts: the one before it is kept in t["iterations"] (each {"iteration",
+        "result", "duration", "failures", ...}); t's own fields are the current run's until close()."""
+        if k > 1:
+            t.setdefault("iterations", []).append(self.run_of(t, k - 1))
+            for f in self.PER_RUN:
+                t.pop(f, None)
+            t["result"], t["failures"] = "running", []
+        t["_iteration"], t["_total"] = k, total
+
+    def run_of(self, t, k):
+        r = {"iteration": k}
+        r.update({f: t[f] for f in self.PER_RUN if f in t})
+        r["failures"] = list(r.get("failures") or [])
+        return r
+
+    def close(self, mode=None):
+        """The run's end: each repeated test's last run joins its "iterations", and the test takes Xcode's verdict
+        (retry on failure: its last run's; otherwise failed when any run failed) and all the runs' issues."""
+        for t in self.tests:
+            k = t.pop("_iteration", None)
+            total = t.pop("_total", None)
+            if k is None:
+                continue
+            runs = t.get("iterations", []) + [self.run_of(t, k)]
+            t["iterations"] = runs
+            t["repetition"] = {"mode": mode, "total": total}
+            results = [r.get("result") for r in runs]
+            if mode == "RunRetryOnFailure":
+                t["result"] = results[-1]
+            elif "failed" in results:
+                t["result"] = "failed"
+            t["duration"] = round(sum(float(r.get("duration") or 0) for r in runs), 6)
+            t["failures"] = [f for r in runs for f in r.get("failures") or []]
+            xf = [f for r in runs for f in r.get("expected_failures") or []]
+            if xf:
+                t["expected_failures"] = xf
+
     def finish(self, why=None):
         """The process ended (or was stopped): a test still running failed with `why`."""
         for t in self.tests:
@@ -1431,6 +1692,7 @@ class Runner:
                                             "%s-%s" % (self.phone, time.strftime("%Y%m%d-%H%M%S")))
         os.makedirs(self.out, exist_ok=True)
         self.installed = {}
+        self.install_times = {}   # app -> (start, end) of its install (Xcode's "Installing built products")
         self.insert = ""
         try:
             for l in open(os.path.join(self.dev, "sim.env")):
@@ -1440,7 +1702,8 @@ class Runner:
             pass
 
     def say(self, msg):
-        if not self.a["quiet"]:
+        """x86sim test's progress lines (not as xcodebuild: it says none, unless --verbose)"""
+        if not self.a["quiet"] and (not self.a["xcodebuild"] or self.a["verbose"]):
             print(msg, flush=True)
 
     def setup_platform(self):
@@ -1455,13 +1718,75 @@ class Runner:
             return self.installed[app]
         bid = bundle_id(app)
         self.say("Installing %s (%s)" % (os.path.basename(app), bid))
+        t0 = time.time()
         r = subprocess.run([os.path.join(HERE, "appinstall.sh"), "install", app], capture_output=True, text=True,
                            env=dict(os.environ, X86SIM_DEVICE=self.dev))
         if r.returncode:
             raise RuntimeError("install %s failed: %s" % (app, (r.stderr or r.stdout).strip()[-500:]))
         path = self.simctl.app_info(bid)["Path"]
         self.installed[app] = (bid, path)
+        self.install_times[app] = (t0, time.time())
         return bid, path
+
+    def device_ids(self):
+        """(model code, platform identifier) of the device, as a baseline's targetDevice names it"""
+        import xcresult
+        di = xcresult.device_info({"platform": self.plat, "device": self.dev, "runtime": self.rt, "phone": self.phone})
+        return di["code"] or di["model"], di["platform"]
+
+    def baseline(self, bundle):
+        """(baselineFileRelativePath, baselineFileURL) of the test bundle's baseline for this machine and device"""
+        rel = baseline_for(undv(bundle), *self.device_ids())
+        return (rel, bundle.rstrip("/") + "/" + rel) if rel else None
+
+    def scheme_info(self, targets):
+        """What Xcode puts in every test process's XCTestConfiguration about the scheme (configuration()): the project's
+        name (baseTestsURL), its products (DependentProductPaths of the .xctestrun, else each target's bundle and apps)
+        by image name (symbolicationImageNames) and bundle id (bundleIDsForCrashReportEmphasis: the test bundles and
+        apps, not UI test runners), its apps' bundle infos for UI tests (ApplicationBundleInfos: localizations and the
+        supported orientations), XCTAutomationSupport's path."""
+        paths = []
+        for t in targets:
+            deps = [self.local(x) for x in t.get("DependentProductPaths") or []]
+            if not deps:
+                host = self.local(t["TestHostPath"]) if t.get("TestHostPath") and kind_of(t) != "logic" else None
+                b = t.get("TestBundlePath") or ""
+                if host and b.startswith("__TESTHOST__/"):
+                    b = os.path.join(host, b[len("__TESTHOST__/"):])
+                else:
+                    b = self.local(b) if b else None
+                app = self.local(t["UITargetAppPath"]) if t.get("UITargetAppPath") else None
+                deps = [x for x in (app, host, b) if x]
+            paths += [x for x in deps if x not in paths and os.path.isdir(x)]
+        names, bids, infos = [], [], {}
+        for x in paths:
+            try:
+                with open(os.path.join(x, "Info.plist"), "rb") as f:
+                    info = plistlib.load(f)
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                info = {}
+            exe = info.get("CFBundleExecutable") or os.path.splitext(os.path.basename(x))[0]
+            if exe not in names:
+                names.append(exe)
+            bid = info.get("CFBundleIdentifier")
+            if not bid:
+                continue
+            if not bid.endswith(".xctrunner") and bid not in bids:
+                bids.append(bid)
+            if x.endswith(".app"):
+                locs = sorted(d[:-6] for d in os.listdir(x) if d.endswith(".lproj") and d != "Base.lproj")
+                infos[bid] = Obj(["XCTApplicationBundleInfo", "NSObject"], {
+                    "localizations": set(locs or [info.get("CFBundleDevelopmentRegion") or "en"]),
+                    "info": {k: v for k, v in info.items() if k.startswith("UISupportedInterfaceOrientations")},
+                    "infoUnprocessed": True})
+        auto = os.path.join(self.rtroot, "Developer/Library/PrivateFrameworks/XCTAutomationSupport.framework")
+        project = self.a.get("spm_project") or next((t["_container"] for t in targets if t.get("_container")), None)
+        if not project:
+            import xcresult
+            project = xcresult.guess_project([{"name": t["_name"]} for t in targets])
+        # NSSets, as Xcode archives them (XCTest's initWithCoder: refuses an NSArray there)
+        return {"project": project, "image_names": set(names) or None, "bundle_ids": set(bids) or None,
+                "bundle_infos": infos or None, "automation": dv(auto) if os.path.isdir(auto) else None}
 
     def subst(self, s, host=None):
         s = s.replace("__TESTROOT__", dv(self.root)).replace("__PLATFORMS__", dv(self.platforms))
@@ -1533,13 +1858,15 @@ class Runner:
             f.write(data)
         return dv(p)
 
-    def wait(self, parser, outf, timeout, alive, raw):
+    def wait(self, parser, outf, timeout, alive, raw, label=None):
         """Follow the test process's output file until XCTest's top suite ended and the process is gone, the process
         ended, or the time is up. Returns 'done', 'exited' or 'timeout'."""
         pos, buf = 0, b""
         end = time.monotonic() + timeout
         last_alive, gone_since, done_at = 0.0, None, None
         verbose, quiet = self.a["verbose"], self.a["quiet"]
+        # xcodebuild prints all of a test process's output, not x86Sim's own lines (libsimshim, the translator)
+        xb = bool(self.a["xcodebuild"])
         while True:
             try:
                 with open(outf, "rb") as f:
@@ -1555,7 +1882,13 @@ class Runner:
                 for l in lines:
                     s = l.decode(errors="replace").rstrip("\r")
                     own = parser.line(s)
-                    if not quiet and (verbose or own):
+                    if (self.a.get("multi") or self.a.get("_parallel_now")) and xb:
+                        # xcodebuild on several destinations: a line per suite start and test end, on the device
+                        if not quiet and own:
+                            out = multi_line(s, label or self.phone)
+                            if out:
+                                print(out, flush=True)
+                    elif not quiet and (verbose or own or (xb and not X86SIM_LINE.match(s))):
                         print(s, flush=True)
                 if parser.done and done_at is None:
                     done_at = time.monotonic()
@@ -1575,36 +1908,172 @@ class Runner:
                 return "timeout"
             time.sleep(0.2)
 
-    def run_target(self, t):
-        name, kind = t["_name"], kind_of(t)
+    def run_parallel(self, t):
+        """Parallel testing (xcodebuild -parallel-testing-enabled YES, the .xctestrun's ParallelizationEnabled): the
+        target's XCTest classes split over workers, each a test process of its own running its classes, as Xcode's
+        workers do. Here the workers share the device: logic tests (the xctest tool) run at once, up to
+        --parallel-workers; tests hosted in an app (one copy per device) run one worker after another. The classes
+        come from the bundle itself (libsimshim: X86SIM_XCTEST_ENUMERATE). The result is the target's, as one run."""
         sel = selection(t, self.a["only"], self.a["skip"], self.names)
+        if sel is None:
+            return None
+        if sel[0]:   # a selection of tests: they run as chosen, in one process
+            return self.run_target(t)
+        listing = os.path.join(self.work, "%s.classes" % re.sub(r"[^A-Za-z0-9._-]+", "_", t["_name"]))
+        quiet = self.a["quiet"]
+        self.a["quiet"] = True
+        try:
+            r0 = self.run_target(t, worker=0, extra_env={"X86SIM_XCTEST_ENUMERATE": dv(listing)})
+        finally:
+            self.a["quiet"] = quiet
+        for f in (r0 or {}).get("log"), (r0 or {}).get("session_log"):   # the listing run's files: not a run
+            if f and os.path.exists(f):
+                os.unlink(f)
+        try:
+            rows = [ln.split() for ln in open(listing).read().splitlines() if ln.strip()]
+        except OSError:
+            rows = []
+        classes = [(r[0].split(".")[-1], int(r[1])) for r in rows if len(r) == 2]
+        n = max(1, int(self.a.get("parallel_workers") or 2))
+        if len(classes) < 2 or n < 2:
+            return self.run_target(t)
+        groups = [[] for _ in range(min(n, len(classes)))]
+        load = [0] * len(groups)
+        for c, k in sorted(classes, key=lambda x: -x[1]):   # the biggest classes first, each to the lightest worker
+            i = load.index(min(load))
+            groups[i].append(c)
+            load[i] += k
+        t0 = time.monotonic()
+        self.a["_parallel_now"] = True
+        try:
+            if kind_of(t) == "logic":
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as ex:
+                    runs = list(ex.map(lambda ig: self.run_target(t, worker=ig[0] + 1, classes=ig[1]), enumerate(groups)))
+            else:
+                runs = [self.run_target(t, worker=i + 1, classes=g) for i, g in enumerate(groups)]
+        finally:
+            self.a["_parallel_now"] = False
+        runs = [r for r in runs if r]
+        if not runs:
+            return None
+        res = dict(runs[0])
+        res["tests"] = sorted([x for r in runs for x in r["tests"]], key=lambda x: (x.get("started") or 0))
+        res["attachments"] = [x for r in runs for x in r.get("attachments") or []]
+        res["logs"] = [r["log"] for r in runs]
+        res["workers"] = [{"classes": g, "pid": r.get("pid"), "log": r["log"]} for g, r in zip(groups, runs)]
+        res["duration"] = round(time.monotonic() - t0, 3)
+        errs = [r["error"] for r in runs if r.get("error")]
+        if errs:
+            res["error"] = "; ".join(errs)
+        else:
+            res.pop("error", None)
+        res["result"] = "failed" if errs or any(x["result"] == "failed" for x in res["tests"]) else "passed"
+        return res
+
+    def run_repeated(self, t):
+        """A target with -test-repetition-relaunch-enabled: each repetition a new test process, as Xcode relaunches it
+        ("Running tests repeatedly N times."): fixed iterations run it N times, until-failure until a test fails,
+        retry-on-failure again while a test fails (all of them, as Xcode); the runs are kept per test as in-process
+        repetitions ("iterations", Xcode's verdicts; none when it ran once)."""
+        rep = repetition(self.a)
+        if not (rep and self.a.get("relaunch")):
+            if self.a.get("parallel") or (self.a.get("parallel") is None and t.get("ParallelizationEnabled")):
+                return self.run_parallel(t)
+            return self.run_target(t)
+        mode, total, name = rep
+        if selection(t, self.a["only"], self.a["skip"], self.names) is None:
+            return None   # not selected
+        if not self.a["quiet"] and not getattr(self, "_noted", False):   # xcodebuild's line for each kind, once
+            self._noted = True
+            note = {3: "Running tests repeatedly %d times." % total,
+                    1: "Running tests multiple times until a failure occurs. Running tests repeatedly up to %d times." % total,
+                    2: "Retrying tests on failure. Running tests repeatedly up to %d times." % total}[mode]
+            if mode != 3 and not self.a.get("iterations"):
+                note += " Pass -test-iterations also to override the default of running up to %d times." % total
+            print(note, flush=True)
+        runs = []
+        for k in range(1, total + 1):
+            r = self.run_target(t, iteration=k)
+            if r is None:
+                break
+            runs.append(r)
+            failed = [x for x in r["tests"] if x["result"] == "failed"]
+            if mode == 1 and failed:
+                break   # until failure
+            if mode == 2 and not failed:
+                break   # retry on failure: Xcode relaunches every test while one fails
+        if not runs:
+            return None
+        res = dict(runs[0])
+        if len(runs) == 1:
+            return res   # one run: no repetitions to keep (Xcode shows none)
+        tests, order = {}, []
+        for k, r in enumerate(runs, 1):
+            for x in r["tests"]:
+                key = (x["class"], x["name"])
+                if key not in tests:
+                    tests[key] = dict(x, iterations=[])
+                    order.append(key)
+                tests[key]["iterations"].append(dict({f: x[f] for f in Parser.PER_RUN if f in x}, iteration=k,
+                                                     started=x.get("started")))
+        for key in order:
+            x = tests[key]
+            results = [i.get("result") for i in x["iterations"]]
+            x["result"] = results[-1] if mode == 2 else "failed" if "failed" in results else results[-1]
+            x["failures"] = [f for i in x["iterations"] for f in i.get("failures") or []]
+            x["duration"] = round(sum(float(i.get("duration") or 0) for i in x["iterations"]), 6)
+            x["repetition"] = {"mode": name, "total": total, "relaunch": True}
+        res["tests"] = [tests[k] for k in order]
+        res["duration"] = round(sum(r["duration"] for r in runs), 3)
+        res["logs"] = [r["log"] for r in runs]
+        res["result"] = "failed" if any(x["result"] == "failed" for x in res["tests"]) or "error" in res else "passed"
+        return res
+
+    def run_target(self, t, iteration=None, worker=None, classes=None, extra_env=None):
+        """One run of a target's test process. worker / classes: a parallel worker's number and its test classes
+        (run_parallel()); extra_env: more of the test process's environment"""
+        name, kind = t["_name"], kind_of(t)
+        # a test plan's configuration: the target runs once per configuration; its files are named for both
+        stem = "%s-%s" % (name, re.sub(r"[^A-Za-z0-9._-]+", "_", t["_config"])) if t.get("_multi") else name
+        if iteration and iteration > 1:   # a relaunched repetition's files
+            stem += "-run%d" % iteration
+        if worker is not None:
+            stem += "-w%d" % worker
+        sel = selection(t, self.a["only"], self.a["skip"], self.names)
+        if sel is not None and classes is not None:
+            sel = (list(classes), sel[1])
         res = {"name": name, "kind": kind, "result": "failed", "tests": [], "duration": 0.0, "log": None}
+        if t.get("_config"):
+            res["configuration"] = t["_config"]   # the test plan configuration it ran in
         if sel is None:
             return None
         only, skip = sel
         t0 = time.monotonic()
+        t_wall = time.time()
+        res["started"] = round(t_wall, 3)   # the target's real start, for its result bundle's times
         parser = Parser(name)
         rec = None
         if kind == "ui" and t.get("PreferredScreenCaptureFormat", "screenRecording") == "screenRecording" \
                 and not self.a["no_recording"] and shutil.which("ffmpeg"):
-            rec = Recorder(self.dev, os.path.join(self.work, "rec-" + name))
+            rec = Recorder(self.dev, os.path.join(self.work, "rec-" + stem))
             parser.on_start, parser.on_end = rec.start, rec.stop
-        log = os.path.join(self.out, name + ".log")
+        log = os.path.join(self.out, stem + ".log")
         res["log"] = log
         # issue #50: libsimshim (simshim_xct.c) writes every XCTest attachment of the test process here
-        att = os.path.join(self.out, "attachments", ".raw-" + name)
+        att = os.path.join(self.out, "attachments", ".raw-" + stem)
         shutil.rmtree(att, ignore_errors=True)
         os.makedirs(att, exist_ok=True)
-        outf = os.path.join(self.work, name + ".out")
+        outf = os.path.join(self.work, stem + ".out")
         open(outf, "w").close()
-        swt_events = os.path.join(self.work, name + ".swt.jsonl")   # Swift Testing's events (simswt)
+        swt_events = os.path.join(self.work, stem + ".swt.jsonl")   # Swift Testing's events (simswt)
         open(swt_events, "w").close()
-        swt_issues = os.path.join(self.work, name + ".issues.jsonl")   # call stacks of unlocated XCTest issues (simswt)
+        swt_issues = os.path.join(self.work, stem + ".issues.jsonl")   # call stacks of unlocated XCTest issues (simswt)
         open(swt_issues, "w").close()
         module = t.get("ProductModuleName") or name
         interop = INTEROP_MODES.get(str(t.get("TestInteropMode", "complete")).lower(), 2)
         products = self.root
-        self.say("\n=== %s (%s tests)" % (name, kind))
+        self.say("\n=== %s (%s tests%s)" % (name, kind, ", %s" % t["_config"] if t.get("_multi") else ""))
         try:
             if kind == "logic":
                 bundle = self.subst(t["TestBundlePath"])
@@ -1615,11 +2084,19 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
-                env["XCTestConfigurationFilePath"] = self.write_config(name, configuration(bundle, module, only=only or None, skip=skip, interop=interop))
+                env.update(extra_env or {})
+                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme,
+                                    opts=self.a, baseline=self.baseline(bundle))
+                env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
+                # the test process, as Xcode's action log names it (runnable: what Xcode launched)
+                res["process"], res["runnable"] = "xctest", undv(agent)
                 rel = os.path.relpath(outf, self.data)
+                t_launch = time.time()
                 r = self.simctl.check(self.simctl.request("spawn", path=agent, args=[bundle] + t.get("CommandLineArguments", []),
                                                           env=env, stdout=rel), "spawn")
+                res["launch"] = {"time": t_launch, "duration": time.time() - t_launch, "path": undv(agent),
+                                 "env": env, "pid": r.get("pid")}
                 exitf = outf + ".exit"
                 alive = lambda: not os.path.exists(exitf)   # noqa: E731
                 bid = None
@@ -1635,6 +2112,8 @@ class Runner:
                     tapp = self.local(t["UITargetAppPath"])
                     tbid, tpath = self.install(tapp)
                 bid, host = self.install(host_local)
+                res["process"] = os.path.basename(app_executable(host_local))
+                res["runnable"] = host_local
                 bundle = self.subst(t["TestBundlePath"], host)
                 if not bundle.startswith(DV):
                     bundle = dv(bundle)
@@ -1642,17 +2121,25 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
+                env.update(extra_env or {})
                 if kind == "ui":
                     tenv = {k: self.subst(str(v), host) for k, v in t.get("UITargetAppEnvironmentVariables", {}).items()}
                     tenv.update(self.profile_env(t["_name"] + "-app"))
+                    # libsimshim: the app's standard output and error (Xcode's StandardOutputAndStandardError-<bid>.txt)
+                    appout = os.path.join(att, "app-output")
+                    os.makedirs(appout, exist_ok=True)
+                    tenv["X86SIM_XCTEST_APP_OUTPUT"] = dv(appout)
+                    tenv.setdefault("OS_ACTIVITY_DT_MODE", "YES")   # its os_log with it (libtrace reads it at its start)
                     for k in [k for k in tenv if k.startswith("DYLD_")]:
                         tenv["X86SIM_A64_GENV_" + k] = tenv[k]
                     cfg = configuration(bundle, module, target_path=tpath, target_bid=tbid,
                                         target_args=[self.subst(x, host) for x in t.get("UITargetAppCommandLineArguments", [])],
-                                        target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop)
+                                        target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop, t=t,
+                                        scheme=self.scheme, opts=self.a, baseline=self.baseline(bundle))
                 else:
-                    cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop)
-                env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
+                    cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t,
+                                        scheme=self.scheme, opts=self.a, baseline=self.baseline(bundle))
+                env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
                 args = list(t.get("CommandLineArguments", []))
@@ -1663,16 +2150,25 @@ class Runner:
                     # screenshots. x86sim records the screen itself (Recorder), so XCTest's recording never starts;
                     # its DisableDiagnosticScreenshots default (the same policy's screenshotsDisabled) does the same.
                     args += ["-DisableDiagnosticScreenshots", "YES"]
+                t_launch = time.time()
                 r = self.simctl.check(self.simctl.request("launch", timeout=50, bundle=bid, env=env,
                                                           args=args, stdout=rel, stderr=rel,
                                                           terminate=True), "launch")
                 pid = r.get("pid")
+                # Xcode's "Launch actions": the install of the test host and its launch, with its environment
+                ins = self.install_times.get(os.path.realpath(host_local))
+                res["launch"] = {"time": t_launch, "duration": time.time() - t_launch, "path": host_local, "bid": bid,
+                                 "env": env, "pid": pid, "args": args, "install": list(ins) if ins else None}
+                if kind == "ui":   # the app the UI tests launch (XCUIApplication.launch(): Xcode logs each)
+                    tins = self.install_times.get(os.path.realpath(tapp))
+                    res["launch"]["target"] = {"path": tapp, "bid": tbid, "install": list(tins) if tins else None}
                 alive = lambda: self.simctl.pidof(bid) is not None   # noqa: E731
                 time.sleep(1)
+            label = "%s - %s (%s)" % (self.phone, res.get("process") or name, pid)   # the console's "on '...'"
             with open(log, "wb") as raw:
-                how = self.wait(parser, outf, self.a["timeout"], alive, raw)
-            parser.swift_testing(swt_events, os.path.join(self.out, name + ".swt.jsonl"), self.root)
-            parser.issue_stacks(swt_issues, os.path.join(self.out, name + ".issues.jsonl"), self.root)
+                how = self.wait(parser, outf, self.a["timeout"], alive, raw, label)
+            parser.swift_testing(swt_events, os.path.join(self.out, stem + ".swt.jsonl"), self.root)
+            parser.issue_stacks(swt_issues, os.path.join(self.out, stem + ".issues.jsonl"), self.root)
             if how == "timeout":
                 parser.finish("timed out after %d s" % self.a["timeout"])
             elif how == "exited":
@@ -1698,7 +2194,35 @@ class Runner:
             res["error"] = str(e)
         except SystemExit as e:   # simctl's die(): no answer from the phone
             res["error"] = "the device did not answer (%s)" % e
+        parser.close(repetition_mode(self.a))
         res["tests"] = parser.tests
+        # XCTest's debug log (libsimshim: Xcode's session log, which XCTest otherwise prints among the output)
+        appout = os.path.join(att, "app-output")
+        if os.path.isdir(appout):   # the UI tests' app, each launch (libsimshim): in launch order
+            outs = sorted((os.path.join(appout, f) for f in os.listdir(appout)), key=os.path.getmtime)
+            if outs:
+                res["app_output"] = {"bid": tbid, "path": os.path.join(self.out, stem + ".app.log")}
+                with open(res["app_output"]["path"], "w") as f:
+                    for o in outs:
+                        with open(o, errors="replace") as g:
+                            f.write(g.read())
+            shutil.rmtree(appout, ignore_errors=True)
+        sess = os.path.join(att, "session.log")
+        res["session_log"] = os.path.join(self.out, stem + ".session.log")
+        now = time.time()
+        with open(res["session_log"], "w") as f:   # Xcode's first lines: the session, the device
+            f.write("%s.%03d x86sim[%d:%d] Beginning test session %s at %s on target %s (%s)\n" % (
+                time.strftime("%H:%M:%S", time.localtime(t_wall)), int(t_wall * 1000) % 1000, os.getpid(),
+                threading.get_ident() % 100000000, name, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_wall)),
+                self.phone, self.rt))
+            f.write("%s.%03d x86sim[%d:%d] Test standard output and standard error is at %s\n" % (
+                time.strftime("%H:%M:%S", time.localtime(now)), int(now * 1000) % 1000, os.getpid(),
+                threading.get_ident() % 100000000, log))
+            if os.path.exists(sess):
+                with open(sess, errors="replace") as g:
+                    f.write(g.read())
+        if os.path.exists(sess):
+            os.unlink(sess)
         res["attachments"] = self.attachments(att, parser.tests)
         if rec:
             rec.keep(os.path.join(self.out, "attachments"), t.get("SystemAttachmentLifetime", "deleteOnSuccess"))
@@ -1720,6 +2244,8 @@ class Runner:
         except OSError:
             lines = []
         self.activities(raw, tests)
+        self.start_times(raw, tests)
+        self.metrics(raw, tests)
         used = set()
         for ln in lines:
             try:
@@ -1751,6 +2277,8 @@ class Runner:
             except OSError:
                 continue
             item = {"name": e.get("name"), "path": dst, "type": e.get("uti"), "from": e.get("from")}
+            if e.get("time"):
+                item["time"] = e["time"]   # XCTAttachment.timestamp (libsimshim's): when the test made it
             if e.get("activity"):
                 item["activity"] = e["activity"]   # the uuid of its activity (its test's "activities")
             (t.setdefault("attachments", []) if t else loose).append(item)
@@ -1760,6 +2288,57 @@ class Runner:
         except OSError:
             pass
         return loose
+
+    @staticmethod
+    def metrics(raw, tests):
+        """A performance test's metrics (libsimshim's metrics.jsonl: XCTest's measure {} / measure(metrics:)): its
+        "metrics", each {"id", "name", "units", "values", "baselineName", "baselineAverage", the max regressions and
+        deviations, "polarity"} as XCTest reported them; a repeated test's, on the run they were measured in"""
+        try:
+            lines = open(os.path.join(raw, "metrics.jsonl")).read().splitlines()
+        except OSError:
+            return
+        for ln in lines:
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            m = re.match(r"-\[(\S+) (\S+)\]$", e.pop("test", None) or "")
+            if not m:
+                continue
+            cls, tn = m.group(1).split(".")[-1], m.group(2)
+            t = next((x for x in tests if not x.get("swift_testing") and x["name"] == tn
+                      and x["class"].split(".")[-1] == cls), None)
+            if t is not None:
+                t.setdefault("metrics", []).append(e)
+
+    @staticmethod
+    def start_times(raw, tests):
+        """When each XCTest test really ran (libsimshim's tests.jsonl: -[XCTestCase performTest:]'s start and end, Unix
+        times): the test's "started", where its result bundle entry and activities are placed, as Xcode's are."""
+        try:
+            lines = open(os.path.join(raw, "tests.jsonl")).read().splitlines()
+        except OSError:
+            return
+        for ln in lines:
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            m = re.match(r"-\[(\S+) (\S+)\]$", e.get("test") or "")
+            if not m or not e.get("start"):
+                continue
+            cls, tn = m.group(1).split(".")[-1], m.group(2)
+            t = next((x for x in tests if not x.get("swift_testing") and x["name"] == tn
+                      and x["class"].split(".")[-1] == cls), None)
+            if t is None:
+                continue
+            if "started" not in t:
+                t["started"] = round(e["start"], 6)
+            # a repeated test: each run's start, in order
+            run = next((r for r in t.get("iterations") or [] if "started" not in r), None)
+            if run is not None:
+                run["started"] = round(e["start"], 6)
 
     @staticmethod
     def activities(raw, tests):
@@ -1799,9 +2378,20 @@ class Runner:
             targets = [t for t in targets if t["_name"] in self.a["targets"]]
             if not targets:
                 die("no test target named %s" % ", ".join(self.a["targets"]))
+        # a test plan's configurations (-only-test-configuration / -skip-test-configuration)
+        if self.a.get("only_config"):
+            targets = [t for t in targets if t.get("_config") in self.a["only_config"]]
+        if self.a.get("skip_config"):
+            targets = [t for t in targets if t.get("_config") not in self.a["skip_config"]]
+        if not targets:
+            die("no test configuration left to run")
+        multi = len({t.get("_config") for t in targets}) > 1
+        for t in targets:
+            t["_multi"] = multi
         self.names = {n for t in targets for n in [t["_name"]] + list(t.get("_modules", ()))}
+        self.scheme = self.scheme_info(targets)
         t0 = time.time()
-        results = [r for r in (self.run_target(t) for t in targets) if r]
+        results = [r for r in (self.run_repeated(t) for t in targets) if r]
         cov = coverage(self.profraw, self.root, os.path.join(self.out, "coverage"), self.say) if self.a["coverage"] else None
         try:
             shutil.rmtree(self.work)
@@ -1874,7 +2464,13 @@ def coverage(profraw, root, out, say):
         say("\ncoverage: " + res["error"])
         return res
     pd = os.path.join(out, "Coverage.profdata")
+    # Xcode's action log ("Generating coverage report"): the profiles, the merge with llvm-profdata's version, times
+    res["profiles"], res["started"] = len(raws), round(time.time(), 3)
+    v = subprocess.run([profdata, "--version"], capture_output=True, text=True).stdout
+    m = re.search(r"version\s+(\S+)", v)
+    res["profdata_version"] = m.group(1) if m else None
     r = subprocess.run([profdata, "merge", "-sparse", "-o", pd] + raws, capture_output=True, text=True)
+    res["merged"] = round(time.time(), 3)
     if r.returncode:
         res["error"] = "llvm-profdata merge: " + (r.stderr.strip().splitlines() or ["failed"])[-1]
         say("\ncoverage: " + res["error"])
@@ -1902,6 +2498,7 @@ def coverage(profraw, root, out, say):
         r = subprocess.run([cov, "export", "-format=lcov", "-instr-profile", pd] + objs, capture_output=True, text=True)
         lcov.append(r.stdout)
     res["lines"] = {"covered": tot_c, "executable": tot_n, "percent": round(100.0 * tot_c / tot_n, 2) if tot_n else 0.0}
+    res["finished"] = round(time.time(), 3)
     with open(os.path.join(out, "lcov.info"), "w") as f:
         f.write("".join(lcov))
     with open(os.path.join(out, "coverage.json"), "w") as f:
@@ -1924,8 +2521,50 @@ def summary(run, results, t0):
     counts["total"] = len(tests)
     ok = results and all(r["result"] == "passed" for r in results)
     return {"phone": run.phone, "device": run.dev, "runtime": run.rt, "platform": run.plat,
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "duration": round(time.time() - t0, 3),
+            "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "started_unix": round(t0, 3),
+            "duration": round(time.time() - t0, 3),
             "result": "passed" if ok else "failed", "counts": counts, "out": run.out, "targets": results}
+
+
+def build_failed(a, blog):
+    """x86sim test --build-log of a build that failed: no test runs; results.json and the result bundle say what Xcode's
+    say then (the build's errors, "Testing cancelled because the build failed.")"""
+    try:
+        dev = x86config.device()
+        plat, rt = device_platform(dev)
+    except SystemExit:
+        dev, plat, rt = None, "ios", None
+    log = blog.get("log") or {}
+    t0 = float(log.get("startTime") or time.time())
+    out = a["out"] or os.path.join(x86config.get("X86SIM_SCRATCH"), "xctest", "build-" + time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(out, exist_ok=True)
+    s = {"phone": os.path.basename(dev or "").replace("device-a64-", "", 1) or None, "device": dev, "runtime": rt,
+         "platform": plat, "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "started_unix": round(t0, 3),
+         "duration": round(time.time() - t0, 3), "result": "failed",
+         "counts": {"passed": 0, "failed": 0, "skipped": 0, "expected_failures": 0, "total": 0}, "out": out,
+         "targets": [], "build": "failed", "build_log": log, "build_issues": blog.get("issues") or [],
+         "error": "the build failed"}
+    for k in ("project", "scheme"):
+        if blog.get(k):
+            s[k] = blog[k]
+    with open(os.path.join(out, "results.json"), "w") as f:
+        json.dump(s, f, indent=1)
+    if a["json"] == "-":
+        json.dump(s, sys.stdout, indent=1)
+    elif a["json"]:
+        with open(a["json"], "w") as f:
+            json.dump(s, f, indent=1)
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            xcresult.write(s, a["result_bundle"], None)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    for i in s["build_issues"]:
+        if i.get("severity") == "error" and not a["quiet"]:
+            print("x86sim test: build error: %s%s" % ("%s:%s: " % (i["file"], i.get("line")) if i.get("file") else "",
+                                                     i.get("message")), file=sys.stderr)
+    return 1
 
 
 def junit(s):
@@ -1966,10 +2605,52 @@ def junit(s):
     return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
 
 
-def report(s, quiet):
-    """xcodebuild's closing lines: the failing tests and TEST SUCCEEDED / FAILED."""
+def multi_line(s, where):
+    """an XCTest line as xcodebuild prints it when it tests on several destinations ("Test suite 'X' started on
+    'iPhone 18 Pro - xctest (7668)'", "Test case 'C.t()' passed on '...' (0.117 seconds)"); None for the others"""
+    m = R_SUITE.match(s)
+    if m and m.group(2) == "started":
+        return "Test suite '%s' started on '%s'" % (m.group(1), where)
+    m = R_CASE_END.match(s)
+    if m:
+        name = m.group(2) if m.group(2).endswith(")") else m.group(2) + "()"
+        return "Test case '%s.%s' %s on '%s' (%.3f seconds)" % (m.group(1).split(".")[-1], name, m.group(3), where,
+                                                               float(m.group(4)))
+    return None
+
+
+def xcodebuild_report(s, action, p):
+    """xcodebuild's own closing lines (Xcode 27.2): where the result bundle is, the failing tests as it names them
+    (XCTest's "Class.test()", Swift Testing's "<innermost suite>.test()" or the function alone), its verdict"""
+    p("Test session results, code coverage, and logs:")
+    p("\t%s" % (s.get("result_bundle") or s["out"]))
+    p("")
+    names = []   # each failing test once (a test plan runs it once per configuration)
+    for t in (t for r in s["targets"] for t in r["tests"] if t["result"] == "failed"):
+        if t.get("swift_testing"):
+            n = ".".join((t.get("suite") or [])[-1:] + [t["name"]])
+        else:
+            n = "%s.%s" % (t["class"].split(".")[-1], t["name"] if t["name"].endswith(")") else t["name"] + "()")
+        if n not in names:
+            names.append(n)
+    if names:
+        p("Failing tests:")
+        for n in names:
+            p("\t%s" % n)
+        p("")
+    p("** TEST %s%s **" % ("EXECUTE " if action == "test-without-building" else "",
+                           "SUCCEEDED" if s["result"] == "passed" else "FAILED"))
+    if not s.get("_multi"):   # (several destinations: each device's "Testing started" came first)
+        p("")
+        p("Testing started")
+
+
+def report(s, quiet, action=None):
+    """x86sim test's closing lines: the failing tests and TEST SUCCEEDED / FAILED (--xcodebuild: xcodebuild's own)"""
     c = s["counts"]
     p = (lambda *x: print(*x, file=sys.stderr)) if quiet == "json" else print
+    if action:
+        return xcodebuild_report(s, action, p)
     p("\nTest session results: %s" % s["out"])
     xf = c.get("expected_failures") or 0
     p("\t%d tests: %d passed, %d failed, %d skipped%s in %.1f s on %s" % (
@@ -2026,7 +2707,12 @@ def fetch_platform(args):
 def parse(argv):
     a = {"xctestrun": None, "products": None, "app": None, "bundles": [], "runner": None, "spm": None, "only": [],
          "skip": [], "targets": [], "platform": None, "out": None, "json": None, "junit": None, "timeout": 1800.0,
-         "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None}
+         "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
+         "built": False, "build_log": None, "xcodebuild": None,
+         "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
+         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False,
+         "multi_child": False, "serial_destinations": False, "max_destinations": None, "parallel": None,
+         "parallel_workers": None, "record_baselines": False, "baselines_project": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2062,6 +2748,48 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--record-baselines":
+            a["record_baselines"] = True
+        elif k == "--baselines-project":
+            a["baselines_project"] = val()
+        elif k == "--parallel-testing":
+            a["parallel"] = val().upper() in ("YES", "1", "TRUE") if "=" in x else True
+        elif k == "--parallel-workers":
+            a["parallel_workers"] = int(val())
+        elif k == "--multi-child":
+            a["multi_child"] = True
+        elif k == "--serial-destinations":
+            a["serial_destinations"] = True
+        elif k == "--max-concurrent-destinations":
+            a["max_destinations"] = int(val())
+        elif k == "--also-on":
+            a["more_phones"].append(val())
+        elif k == "--only-test-configuration":
+            a["only_config"].append(val())
+        elif k == "--skip-test-configuration":
+            a["skip_config"].append(val())
+        elif k == "--test-iterations":
+            a["iterations"] = int(val())
+        elif k == "--test-repetition-relaunch":
+            a["relaunch"] = True
+        elif k == "--retry-tests-on-failure":
+            a["retry"] = True
+        elif k == "--run-tests-until-failure":
+            a["until_failure"] = True
+        elif k == "--test-timeouts-enabled":
+            a["timeouts"] = val().upper() in ("YES", "1", "TRUE")
+        elif k == "--default-test-execution-time-allowance":
+            a["default_allowance"] = int(float(val()))
+        elif k == "--maximum-test-execution-time-allowance":
+            a["max_allowance"] = int(float(val()))
+        elif k == "--xcodebuild":
+            a["xcodebuild"] = val()
+            if a["xcodebuild"] not in ("test", "test-without-building"):
+                die("--xcodebuild: test or test-without-building")
+        elif k == "--built":
+            a["built"] = True
+        elif k == "--build-log":
+            a["build_log"] = val()
         elif k == "--result-bundle":
             a["result_bundle"] = val()
         elif k == "--timeout":
@@ -2090,8 +2818,201 @@ def main(argv):
     if argv and argv[0] == "fetch-platform":
         return fetch_platform(argv[1:])
     a = parse(argv)
+    blog = None
+    if a["build_log"]:
+        try:
+            with open(a["build_log"]) as f:
+                blog = json.load(f)
+        except (OSError, ValueError) as e:
+            die("--build-log %s: %s" % (a["build_log"], e))
+        if blog.get("status") == "failed":
+            return build_failed(a, blog)
     if not (a["xctestrun"] or a["app"] or a["bundles"] or a["runner"] or a["spm"]):
         die("nothing to run\n" + USAGE)
+    phones = [None] + list(a["more_phones"])   # None: the device x86sim picked (X86SIM_DEVICE)
+    a["multi"] = len(phones) > 1 or a["multi_child"]
+    first_dev = os.environ.get("X86SIM_DEVICE")
+    if len(phones) > 1 and not a["serial_destinations"]:
+        return concurrent_destinations(argv, a, phones)
+    results = []
+    for ph in phones:
+        if ph is not None:
+            dev = device_path(ph)
+            if not dev:
+                die("no device %s" % ph)
+            os.environ["X86SIM_DEVICE"] = dev
+            x86config._cfg = None   # config.sh again, for this device
+            if "simctl" in sys.modules:   # simctl binds its device's data dir when imported
+                import importlib
+                importlib.reload(sys.modules["simctl"])
+        b = dict(a)
+        if ph is not None and a["out"]:
+            b["out"] = "%s-%s" % (a["out"].rstrip("/"), ph)
+        s, run, root = run_on_device(b, blog)
+        results.append((s, run, root))
+    if first_dev is not None:
+        os.environ["X86SIM_DEVICE"] = first_dev
+        x86config._cfg = None
+    summaries = [r[0] for r in results]
+    s = summaries[0]
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            if len(summaries) > 1:   # one action per device, as xcodebuild with several -destination
+                xcresult.write_many(summaries, a["result_bundle"], results[0][2])
+            else:
+                xcresult.write(s, a["result_bundle"], results[0][2])
+            for x in summaries:
+                x["result_bundle"] = os.path.abspath(a["result_bundle"])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    if a["json"] == "-":
+        json.dump(s if len(summaries) == 1 else summaries, sys.stdout, indent=1)
+        print()
+    elif a["json"]:
+        with open(a["json"], "w") as f:
+            json.dump(s if len(summaries) == 1 else summaries, f, indent=1)
+    if a["multi_child"]:
+        pass   # one of several destinations: the parent reports
+    elif len(summaries) == 1:
+        report(s, a["quiet"], a["xcodebuild"])
+    else:
+        merged = dict(s, targets=[t for x in summaries for t in x["targets"]], _multi=True,
+                      result="passed" if all(x["result"] == "passed" for x in summaries) else "failed")
+        if a["xcodebuild"]:
+            report(merged, a["quiet"], a["xcodebuild"])
+        else:
+            for x in summaries:
+                report(x, a["quiet"])
+    if not all(x["targets"] for x in summaries):
+        return 2
+    return 0 if all(x["result"] == "passed" for x in summaries) else 1
+
+
+def strip_args(argv, drop_with_value, drop=()):
+    """argv without the options named (and their values)"""
+    out, it = [], iter(argv)
+    for x in it:
+        k = x.split("=", 1)[0]
+        if k in drop_with_value:
+            if "=" not in x:
+                next(it, None)
+            continue
+        if k in drop:
+            continue
+        out.append(x)
+    return out
+
+
+def concurrent_destinations(argv, a, phones):
+    """Several devices at once, as xcodebuild tests its destinations (at most --max-concurrent-destinations, Xcode's
+    -maximum-concurrent-test-simulator-destinations, default 4): an x86sim test of each device in its own process
+    (--multi-child: xcodebuild's per-destination lines, its results.json), then one result bundle and the closing
+    lines over all of them"""
+    import concurrent.futures
+    devs = [os.environ.get("X86SIM_DEVICE")] + [device_path(p) for p in phones[1:]]
+    for p, d in zip(phones, devs):
+        if not d:
+            die("no device %s" % p)
+    work = tempfile.mkdtemp(prefix="dests-", dir=x86config.get("X86SIM_SCRATCH"))
+    base = strip_args(argv, ("--also-on", "--result-bundle", "--json", "--junit", "--out", "--max-concurrent-destinations"))
+    limit = a["max_destinations"] or 4
+    if a["xcodebuild"] and not a["quiet"]:
+        print("Testing on multiple destinations concurrently. Note that it is not possible to run tests in parallel on "
+              "individual destinations in this mode. Pass -disable-concurrent-destination-testing instead to allow tests "
+              "to run in parallel on each destination, but have the destinations run serially.Maximum concurrent test "
+              "device destinations is unlimited. (Adjust this with -maximum-concurrent-test-device-destinations.) "
+              "Maximum concurrent test simulator destinations is set to %d. (Adjust this with "
+              "-maximum-concurrent-test-simulator-destinations.)" % limit, flush=True)
+
+    def one(i):
+        js = os.path.join(work, "%d.json" % i)
+        cmd = [sys.executable, os.path.abspath(__file__)] + base + ["--multi-child", "--json", js]
+        if a["out"]:
+            cmd += ["--out", a["out"] if i == 0 else "%s-%s" % (a["out"].rstrip("/"), phones[i])]
+        subprocess.run(cmd, env=dict(os.environ, X86SIM_DEVICE=devs[i]))
+        try:
+            with open(js) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=limit) as ex:
+        summaries = list(ex.map(one, range(len(devs))))
+    shutil.rmtree(work, ignore_errors=True)
+    missing = [p or "the first device" for p, x in zip(phones, summaries) if x is None]
+    summaries = [x for x in summaries if x is not None]
+    if missing:
+        print("x86sim test: no results from %s" % ", ".join(missing), file=sys.stderr)
+    if not summaries:
+        return 2
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            products = None
+            if a["xctestrun"]:
+                products = load_xctestrun(a["xctestrun"], a["products"])[0]
+            xcresult.write_many(summaries, a["result_bundle"], products) if len(summaries) > 1 else \
+                xcresult.write(summaries[0], a["result_bundle"], products)
+            for x in summaries:
+                x["result_bundle"] = os.path.abspath(a["result_bundle"])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    if a["json"]:
+        if a["json"] == "-":
+            json.dump(summaries, sys.stdout, indent=1)
+            print()
+        else:
+            with open(a["json"], "w") as f:
+                json.dump(summaries, f, indent=1)
+    ok = all(x["result"] == "passed" for x in summaries) and not missing
+    merged = dict(summaries[0], targets=[t for x in summaries for t in x["targets"]], _multi=True,
+                  result="passed" if ok else "failed")
+    if a["xcodebuild"]:
+        report(merged, a["quiet"], a["xcodebuild"])
+    else:
+        for x in summaries:
+            report(x, a["quiet"])
+    return 0 if ok else 1
+
+
+def record_run_baselines(a, run, s):
+    """--record-baselines: the run's performance metrics as the project's baselines (record_baselines())"""
+    proj = a.get("baselines_project")
+    if not proj and a.get("xctestrun"):
+        try:
+            with open(a["xctestrun"], "rb") as f:
+                d = plistlib.load(f)
+            md = d.get("__xctestrun_metadata__") or {}
+            ci = md.get("ContainerInfo") or d.get("ContainerInfo") or {}
+            if md.get("SweetPadSourceRoot") and ci.get("ContainerName"):
+                proj = os.path.join(md["SweetPadSourceRoot"], ci["ContainerName"] + ".xcodeproj")
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            pass
+    if not proj or not os.path.isdir(proj):
+        print("x86sim test: --record-baselines needs the project (--baselines-project P.xcodeproj)", file=sys.stderr)
+        return
+    code, pid = run.device_ids()
+    for t in s["targets"]:
+        if any(x.get("metrics") for x in t["tests"]):
+            d = record_baselines(proj, t["name"], t["tests"], code, pid)
+            if d:
+                s.setdefault("baselines", []).append(d)
+                if not a["quiet"]:
+                    print("x86sim test: %s: baselines set in %s (rebuild to use them)" % (t["name"], d), file=sys.stderr)
+            else:
+                print("x86sim test: %s: no target of that name in %s" % (t["name"], proj), file=sys.stderr)
+
+
+def device_path(name):
+    """a device by name (as x86sim names them: var/device-a64-<name>), folder or path"""
+    for c in (name, os.path.join(ROOT, "var", name), os.path.join(ROOT, "var", "device-a64-" + name)):
+        if os.path.isdir(c) and os.path.exists(os.path.join(c, "runtime")):
+            return os.path.realpath(c)
+    return None
+
+
+def run_on_device(a, blog):
+    """The run on one device (X86SIM_DEVICE): its summary, written as results.json and junit.xml"""
     run = Runner(a)
     try:
         if a["xctestrun"]:
@@ -2102,34 +3023,28 @@ def main(argv):
             root, targets = explicit_targets(a)
     except (RuntimeError, OSError, plistlib.InvalidFileException) as e:
         die(str(e))
+    if a["multi"] and a["xcodebuild"] and not a["quiet"]:
+        print("Testing started", flush=True)
     s = run.run(root, targets)
+    if a["built"] or blog:
+        s["build"] = "succeeded"   # the result bundle's build action (xcodebuild test built the products)
+    if blog:
+        s["build_log"], s["build_issues"] = blog.get("log"), blog.get("issues") or []
     if a.get("spm_project"):   # the package: the .xcresult's project and scheme, as Xcode names them
         s.setdefault("project", a["spm_project"])
+    if a["record_baselines"]:
+        record_run_baselines(a, run, s)
     with open(os.path.join(run.out, "results.json"), "w") as f:
         json.dump(s, f, indent=1)
     x = junit(s)
     with open(os.path.join(run.out, "junit.xml"), "w") as f:
         f.write(x)
-    if a["junit"]:
+    if a["junit"] and not a["multi"]:
         with open(a["junit"], "w") as f:
             f.write(x)
-    if a["result_bundle"]:
-        import xcresult
-        try:
-            xcresult.write(s, a["result_bundle"], root)
-            s["result_bundle"] = os.path.abspath(a["result_bundle"])
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
-    if a["json"] == "-":
-        json.dump(s, sys.stdout, indent=1)
-        print()
-    elif a["json"]:
-        with open(a["json"], "w") as f:
-            json.dump(s, f, indent=1)
-    report(s, a["quiet"])
-    if not s["targets"]:
-        return 2
-    return 0 if s["result"] == "passed" else 1
+    if a["multi"] and a["xcodebuild"] and not a["quiet"]:
+        print("Testing %s on '%s'" % ("passed" if s["result"] == "passed" else "failed", s["phone"]), flush=True)
+    return s, run, root
 
 
 if __name__ == "__main__":

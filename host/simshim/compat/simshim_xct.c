@@ -3,12 +3,14 @@
 // result bundle. x86sim test runs XCTest without an IDE session, so they went nowhere. With
 // X86SIM_XCTEST_ATTACHMENTS=<dir> (set by cli/libexec/xctest.py for the test process), each attachment's payload is
 // written to <dir>/<n>.<ext> as it is added, and one JSON line to <dir>/index.jsonl: the test it was added in, its
-// name, type and lifetime (0 keepAlways, 1 deleteOnSuccess), where it came from. xctest.py sorts them per test, drops
-// the deleteOnSuccess ones of passed tests and lists the rest in results.json. An activity's attachment also names
-// its activity ("activity": the XCActivityRecord's uuid), and every activity XCTest finishes is one line of
-// <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null at the top), "title", "type",
-// "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's ActionTestActivitySummary), which on a Mac goes to
-// the IDE session.
+// name, type, time (XCTAttachment.timestamp) and lifetime (0 keepAlways, 1 deleteOnSuccess), where it came from.
+// xctest.py sorts them per test, drops the deleteOnSuccess ones of passed tests and lists the rest in results.json.
+// An activity's attachment also names its activity ("activity": the XCActivityRecord's uuid), and every activity
+// XCTest finishes is one line of <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null
+// at the top), "title", "type", "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's
+// ActionTestActivitySummary), which on a Mac goes to the IDE session. Each test it performs is one line of
+// <dir>/tests.jsonl (when it ran); XCTest's debug log goes to <dir>/session.log, performance metrics to
+// <dir>/metrics.jsonl.
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
@@ -20,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char* xct_dir;
@@ -30,7 +34,8 @@ static unsigned xct_seq;
 // attachments written already (one can pass two of the hooked methods): marked on the attachment itself, as a freed
 // one's address is soon another's (a list of addresses dropped the failure triage's "App UI hierarchy" text)
 static char xct_seen_key;
-static IMP xct_invoke_orig, xct_act_orig, xct_issue_orig, xct_case_orig, xct_perform_orig, xct_finish_orig;
+static IMP xct_invoke_orig, xct_act_orig, xct_issue_orig, xct_case_orig, xct_perform_orig, xct_finish_orig, xct_debug_orig;
+static IMP xct_measure_orig;
 
 static const char* xct_cstr(id s)
 {
@@ -70,6 +75,8 @@ static const char* xct_uuid(id o, const char* sel)
 	return u ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(u, sel_registerName("UUIDString"))) : NULL;
 }
 
+static double xct_now(void);
+
 static void xct_write(id att, const char* from, id activity)
 {
 	if (getenv("X86SIM_XCTEST_ATT_DEBUG")) { char b[160]; int k = snprintf(b, sizeof b, "simshim: attachment %p from %s\n", (void*) att, from); write(2, b, k); }
@@ -95,6 +102,11 @@ static void xct_write(id att, const char* from, id activity)
 	const char* uti = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(att, sel_registerName("uniformTypeIdentifier")));
 	const char* name = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(att, sel_registerName("name")));
 	long lifetime = ((long (*)(id, SEL)) objc_msgSend)(att, sel_registerName("lifetime"));
+	// XCTAttachment.timestamp (Xcode's attachment time in the result bundle); XCTest sets it when the attachment is
+	// added (-captureTimestampIfMissing:), after this hook: now, then
+	SEL tsel = sel_registerName("timestamp");
+	id ts = class_respondsToSelector(object_getClass(att), tsel) ? ((id (*)(id, SEL)) objc_msgSend)(att, tsel) : nil;
+	double when = ts ? ((double (*)(id, SEL)) objc_msgSend)(ts, sel_registerName("timeIntervalSince1970")) : xct_now();
 	char file[64], path[1200];
 	snprintf(file, sizeof file, "%u.%s", n, xct_ext(uti));
 	snprintf(path, sizeof path, "%s/%s", xct_dir, file);
@@ -115,6 +127,7 @@ static void xct_write(id att, const char* from, id activity)
 		fputs(",\"uti\":", f); xct_json_str(f, uti);
 		const char* au = xct_uuid(activity, "uuid");
 		if (au) { fputs(",\"activity\":", f); xct_json_str(f, au); }
+		if (when > 0) fprintf(f, ",\"time\":%.6f", when);
 		fprintf(f, ",\"lifetime\":%ld,\"from\":\"%s\",\"seq\":%u,\"file\":", lifetime, from, n);
 		if (ok) xct_json_str(f, file); else fputs("null", f);
 		fputs("}\n", f);
@@ -134,15 +147,65 @@ static void xct_invoke(id self, SEL sel)
 	xct_test[0] = 0;
 	pthread_mutex_unlock(&xct_mu);
 }
+static double xct_now(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+// every test XCTest performs is one line of <dir>/tests.jsonl: {"test", "start", "finish"} (Unix times), when it
+// really ran (Xcode's ActionTestSummary times come from the IDE session's test-started / -finished messages)
+// X86SIM_XCTEST_ENUMERATE=<file>: list the bundle's test classes instead of running tests (x86sim test's parallel
+// testing splits a target by class, as Xcode's workers do): at the first test XCTest performs, every XCTestCase
+// subclass outside XCTest with tests is one line of <file> ("<class name> <test count>"), and the process exits.
+static void xct_enumerate(const char* path)
+{
+	FILE* f = fopen(path, "w");
+	if (!f)
+		_exit(1);
+	Class tc = objc_getClass("XCTestCase");
+	id all = tc ? ((id (*)(Class, SEL)) objc_msgSend)(tc, sel_registerName("allSubclassesOutsideXCTest")) : nil;
+	if (all && class_respondsToSelector(object_getClass(all), sel_registerName("allObjects")))
+		all = ((id (*)(id, SEL)) objc_msgSend)(all, sel_registerName("allObjects"));   // a set
+	long n = all ? ((long (*)(id, SEL)) objc_msgSend)(all, sel_registerName("count")) : 0;
+	for (long i = 0; i < n; i++) {
+		id c = ((id (*)(id, SEL, long)) objc_msgSend)(all, sel_registerName("objectAtIndex:"), i);
+		id suite = ((id (*)(id, SEL)) objc_msgSend)(c, sel_registerName("defaultTestSuite"));
+		long count = suite ? ((long (*)(id, SEL)) objc_msgSend)(suite, sel_registerName("testCaseCount")) : 0;
+		if (count > 0)
+			fprintf(f, "%s %ld\n", class_getName((Class) c), count);
+	}
+	fclose(f);
+	_exit(0);
+}
+
 static void xct_perform(id self, SEL sel, id run)
 {
+	const char* en = getenv("X86SIM_XCTEST_ENUMERATE");
+	if (en && *en)
+		xct_enumerate(en);
 	const char* nm = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(self, sel_registerName("name")));
+	char name[512];
+	snprintf(name, sizeof name, "%s", nm ? nm : "");
 	pthread_mutex_lock(&xct_mu);
-	snprintf(xct_case, sizeof xct_case, "%s", nm ? nm : "");
+	snprintf(xct_case, sizeof xct_case, "%s", name);
 	pthread_mutex_unlock(&xct_mu);
+	double start = xct_now();
 	((void (*)(id, SEL, id)) xct_perform_orig)(self, sel, run);
+	double finish = xct_now();
 	pthread_mutex_lock(&xct_mu);
 	xct_case[0] = 0;
+	if (xct_dir && name[0]) {
+		char p[1200];
+		snprintf(p, sizeof p, "%s/tests.jsonl", xct_dir);
+		FILE* f = fopen(p, "a");
+		if (f) {
+			fputs("{\"test\":", f); xct_json_str(f, name);
+			fprintf(f, ",\"start\":%.6f,\"finish\":%.6f}\n", start, finish);
+			fclose(f);
+		}
+	}
 	pthread_mutex_unlock(&xct_mu);
 }
 
@@ -178,6 +241,110 @@ static void xct_finish(id self, SEL sel, id date)
 	pthread_mutex_unlock(&xct_mu);
 }
 
+// -[XCTDefaultDebugLogHandler logDebugMessage:]: XCTest's debug log ("Evaluating query:", "... faulted in ..."). With
+// Xcode's IDE session it goes to the session log (the result bundle's Diagnostics/.../Session-<Target>-<time>.log);
+// without one XCTest prints it to stderr, among the test output. As Xcode keeps it: <dir>/session.log (XCTest's own
+// "HH:MM:SS.mmm <process>[<pid>:<thread>] <message>" lines), and not on stderr.
+static void xct_debug_write(const char* m)
+{
+	// XCTest hands the line formatted ("HH:MM:SS.mmm <process>[<pid>:<thread>] <message>\n"), as the session log has it
+	if (!m || !*m)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/session.log", xct_dir);
+	pthread_mutex_lock(&xct_mu);
+	FILE* f = fopen(p, "a");
+	if (f) {
+		fputs(m, f);
+		if (m[strlen(m) - 1] != '\n')
+			fputc('\n', f);
+		fclose(f);
+	}
+	pthread_mutex_unlock(&xct_mu);
+}
+
+static void xct_debug(id self, SEL sel, id msg)
+{
+	if (!xct_dir) {
+		if (xct_debug_orig)
+			((void (*)(id, SEL, id)) xct_debug_orig)(self, sel, msg);
+		return;
+	}
+	xct_debug_write(xct_cstr(msg));
+}
+
+// XCTAutomationSupport's debug log (_XCTASLog: "Evaluating query:", "... faulted in ..."): to the logger XCTest sets
+// with XCTASSetDebugLogger (an XCTASDebugLogDelegate: -logDebugMessage:), which on a Mac is the IDE session; without
+// one it goes to os_log, so onto stderr. x86Sim sets one that writes the session log.
+static void xct_set_as_logger(void)
+{
+	static bool done;
+	void (*set)(id) = (void (*)(id)) dlsym(RTLD_DEFAULT, "XCTASSetDebugLogger");
+	if (done || !set || !xct_dir)
+		return;
+	done = true;
+	Class c = objc_allocateClassPair(objc_getClass("NSObject"), "X86SimXCTDebugLog", 0);
+	if (!c)
+		return;
+	class_addMethod(c, sel_registerName("logDebugMessage:"), (IMP) xct_debug, "v@:@");
+	objc_registerClassPair(c);
+	id o = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(Class, SEL)) objc_msgSend)(c, sel_registerName("alloc")),
+	                                        sel_registerName("init"));
+	set(o);
+}
+
+static void xct_json_num(FILE* f, id n)
+{
+	if (!n || !class_respondsToSelector(object_getClass(n), sel_registerName("doubleValue")))
+		fputs("null", f);
+	else
+		fprintf(f, "%.17g", ((double (*)(id, SEL)) objc_msgSend)(n, sel_registerName("doubleValue")));
+}
+
+// -[XCTestObservationCenter _testCase:didMeasureValues:forPerformanceMetricID:...:polarity:]: a performance test's
+// metric (measure {}, measure(metrics:)). On a Mac it goes to the IDE session; here one JSON line of
+// <dir>/metrics.jsonl: {"test", "id", "name", "units", "values", "baselineName", "baselineAverage",
+// "maxPercentRegression", "maxPercentRelativeStandardDeviation", "maxRegression", "maxStandardDeviation", "polarity"}.
+typedef void (*xct_measure_fn)(id, SEL, id, id, id, id, id, id, id, id, id, id, id, id, long);
+static void xct_measure(id self, SEL sel, id test, id values, id mid, id name, id units, id bname, id bavg, id mpr,
+                        id mprsd, id mreg, id msd, id ctx, long polarity)
+{
+	((xct_measure_fn) xct_measure_orig)(self, sel, test, values, mid, name, units, bname, bavg, mpr, mprsd, mreg, msd,
+	                                    ctx, polarity);
+	if (!xct_dir)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/metrics.jsonl", xct_dir);
+	pthread_mutex_lock(&xct_mu);
+	FILE* f = fopen(p, "a");
+	if (f) {
+		// the test case's run (XCTestCaseRun): its test is the XCTestCase
+		id tc = test && class_respondsToSelector(object_getClass(test), sel_registerName("test"))
+		        ? ((id (*)(id, SEL)) objc_msgSend)(test, sel_registerName("test")) : test;
+		const char* tn = tc && class_respondsToSelector(object_getClass(tc), sel_registerName("name"))
+		                 ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(tc, sel_registerName("name"))) : NULL;
+		fputs("{\"test\":", f); xct_json_str(f, tn);
+		fputs(",\"id\":", f); xct_json_str(f, xct_cstr(mid));
+		fputs(",\"name\":", f); xct_json_str(f, xct_cstr(name));
+		fputs(",\"units\":", f); xct_json_str(f, xct_cstr(units));
+		fputs(",\"values\":[", f);
+		long n = values ? ((long (*)(id, SEL)) objc_msgSend)(values, sel_registerName("count")) : 0;
+		for (long i = 0; i < n; i++) {
+			if (i) fputc(',', f);
+			xct_json_num(f, ((id (*)(id, SEL, long)) objc_msgSend)(values, sel_registerName("objectAtIndex:"), i));
+		}
+		fputs("],\"baselineName\":", f); if (bname) xct_json_str(f, xct_cstr(bname)); else fputs("null", f);
+		fputs(",\"baselineAverage\":", f); xct_json_num(f, bavg);
+		fputs(",\"maxPercentRegression\":", f); xct_json_num(f, mpr);
+		fputs(",\"maxPercentRelativeStandardDeviation\":", f); xct_json_num(f, mprsd);
+		fputs(",\"maxRegression\":", f); xct_json_num(f, mreg);
+		fputs(",\"maxStandardDeviation\":", f); xct_json_num(f, msd);
+		fprintf(f, ",\"polarity\":%ld}\n", polarity);
+		fclose(f);
+	}
+	pthread_mutex_unlock(&xct_mu);
+}
+
 static void xct_act_add(id self, SEL sel, id att) { xct_write(att, "activity", self); ((void (*)(id, SEL, id)) xct_act_orig)(self, sel, att); }
 static void xct_issue_add(id self, SEL sel, id att) { xct_write(att, "issue", NULL); ((void (*)(id, SEL, id)) xct_issue_orig)(self, sel, att); }
 static void xct_case_add(id self, SEL sel, id att) { xct_write(att, "test", NULL); ((void (*)(id, SEL, id)) xct_case_orig)(self, sel, att); }
@@ -197,6 +364,13 @@ static void xct_added(const struct mach_header* mh, intptr_t slide)
 	if (!xct_case_orig) xct_case_orig = xct_hook("XCTestCase", "addAttachment:", (IMP) xct_case_add);
 	if (!xct_perform_orig) xct_perform_orig = xct_hook("XCTestCase", "performTest:", (IMP) xct_perform);
 	if (!xct_finish_orig) xct_finish_orig = xct_hook("XCActivityRecord", "setFinish:", (IMP) xct_finish);
+	if (!xct_debug_orig) xct_debug_orig = xct_hook("XCTDefaultDebugLogHandler", "logDebugMessage:", (IMP) xct_debug);
+	xct_set_as_logger();
+	if (!xct_measure_orig)
+		xct_measure_orig = xct_hook("XCTestObservationCenter", "_testCase:didMeasureValues:forPerformanceMetricID:name:"
+		                            "unitsOfMeasurement:baselineName:baselineAverage:maxPercentRegression:"
+		                            "maxPercentRelativeStandardDeviation:maxRegression:maxStandardDeviation:"
+		                            "sourceCodeContext:polarity:", (IMP) xct_measure);
 	static bool said;
 	if (!said && xct_invoke_orig) {
 		said = true;
@@ -271,8 +445,42 @@ __attribute__((constructor)) static void tm_init(void)
 	_dyld_register_func_for_add_image(tm_added);
 }
 
+// The app a UI test launches (XCUIApplication: XCTestConfiguration.targetApplicationEnvironment, from x86sim test):
+// X86SIM_XCTEST_APP_OUTPUT=<dir> sends its standard output and error to <dir>/<pid>.txt, as Xcode keeps them
+// (Diagnostics/.../StandardOutputAndStandardError-<bundle id>.txt), with Xcode's first line.
+static void xct_app_output(void)
+{
+	const char* d = getenv("X86SIM_XCTEST_APP_OUTPUT");
+	if (!d || !*d)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/%d.txt", d, getpid());
+	int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0)
+		return;
+	time_t now = time(NULL);
+	struct tm tm;
+	gmtime_r(&now, &tm);
+	char when[64];
+	strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S +0000", &tm);
+	id bundle = ((id (*)(Class, SEL)) objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+	const char* bid = bundle ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(bundle, sel_registerName("bundleIdentifier"))) : NULL;
+	dprintf(fd, "Standard output and standard error from %s with process ID %d beginning at %s\n\n",
+	        bid ? bid : getprogname(), getpid(), when);
+	dup2(fd, 1);
+	dup2(fd, 2);
+	close(fd);
+	unsetenv("X86SIM_XCTEST_APP_OUTPUT");   // not for the processes it starts
+	// its os_log on stderr too, as an app Xcode launches has it: x86sim test passes OS_ACTIVITY_DT_MODE in its
+	// environment (libtrace may have read it before this constructor)
+	const char* mode = getenv("OS_ACTIVITY_MODE");
+	if (mode && !strcmp(mode, "disable"))   // a launchd job's default here (mksimdevice.py): it also silences DT mode
+		unsetenv("OS_ACTIVITY_MODE");
+}
+
 __attribute__((constructor)) static void xct_init(void)
 {
+	xct_app_output();
 	const char* d = getenv("X86SIM_XCTEST_ATTACHMENTS");
 	if (!d || !*d)
 		return;

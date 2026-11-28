@@ -190,6 +190,16 @@ def mac_tool(remote, name, run):
         check(rc == 0 and "ActionTestPlanRunSummaries" in out, "%s: get object --legacy --id <testsRef>" % name)
     rc, out, err = get("get log --type action --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get log --type action" % name)
+    res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
+    res["diagnostics"] = diagnostics_files(sh, b)
+    res["metrics"] = perf_metrics(sh, b)
+    # the build: its status and issues; its log when the run built the products (the xcodebuild stand-in's test)
+    rc, out, err = get("get build-results --path %s" % b)
+    check(rc == 0 and out.strip().startswith("{"), "%s: get build-results" % name)
+    res["build"] = json.loads(out) if rc == 0 else {}
+    if res["build"].get("status") not in (None, "notRequested"):
+        rc, out, err = get("get log --type build --path %s" % b)
+        check(rc == 0 and out.strip().startswith("{"), "%s: get log --type build" % name)
     res["legacy_issues"] = legacy_issues(remote + "/" + name)
     # every test's details and activities
     ids = []
@@ -203,7 +213,9 @@ def mac_tool(remote, name, run):
             bad.append(tid)
         else:
             res["details"][tid] = json.loads(o1)
-    check(ids and not bad, "%s: test-details + activities for all %d tests%s" % (name, len(ids), " (bad: %s)" % bad if bad else ""))
+    # a run whose build failed has no tests (Xcode's too)
+    check((ids or not res["summary"].get("totalTestCount")) and not bad,
+          "%s: test-details + activities for all %d tests%s" % (name, len(ids), " (bad: %s)" % bad if bad else ""))
     # attachments: every one in results.json comes out of export attachments, byte for byte
     want = {}
     for t in run.get("targets", []):
@@ -262,6 +274,10 @@ def apple(remote_bundle, coverage=False):
             return None
         res[k] = json.loads(out)
     res["legacy_issues"] = legacy_issues(remote_bundle)
+    rc, out, err = ssh("xcrun xcresulttool get log --type action --path %s" % shlex.quote(remote_bundle))
+    res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
+    res["diagnostics"] = diagnostics_files(ssh, shlex.quote(remote_bundle))
+    res["metrics"] = perf_metrics(ssh, shlex.quote(remote_bundle))
     urls = []
     nodes(res["tests"], urls=urls)
     b = shlex.quote(remote_bundle)
@@ -390,6 +406,66 @@ def details_tree(d):
     return top
 
 
+def perf_metrics(sh, bundle):
+    """`xcresulttool get test-results metrics`: per performance test its metrics without their measured values (the
+    number of measurements kept)"""
+    rc, out, _ = sh("xcrun xcresulttool get test-results metrics --path %s" % bundle)
+    try:
+        tests = json.loads(out) if rc == 0 else []
+    except ValueError:
+        return None
+    res = {}
+    for t in tests:
+        res[t["testIdentifier"]] = sorted((m.get("identifier"), m.get("displayName"), m.get("unitOfMeasurement"),
+                                           m.get("polarity"), m.get("baselineName"), m.get("baselineAverage"),
+                                           m.get("maxPercentRegression"), m.get("maxPercentRelativeStandardDeviation"),
+                                           m.get("maxRegression"), m.get("maxStandardDeviation"), len(m.get("measurements") or []))
+                                          for r in t.get("testRuns") or [] for m in r.get("metrics") or [])
+    return res
+
+
+def diagnostics_files(sh, bundle):
+    """The test targets' files of `xcresulttool export diagnostics`, their UUIDs and times left out
+    (<Target>-*-Configuration-Test Scheme Action-Iteration-1/<Target>-*/StandardOutputAndStandardError*.txt,
+    Session-<Target>-*.log)"""
+    rc, out, _ = sh("d=$(mktemp -d) && xcrun xcresulttool export diagnostics --path %s --output-path $d >/dev/null && "
+                    "(cd $d && find . -type f); rm -rf $d" % bundle)
+    uu = r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
+    names = set()
+    for ln in out.splitlines():
+        parts = ln.split("/")
+        if len(parts) == 5 and "-Configuration-" in parts[2]:
+            f = re.sub(r"-\d{4}-\d\d-\d\d_\d{6}-\w{6}\.log$", ".log", parts[4])
+            names.add("/".join([re.sub(uu, "*", parts[2]), re.sub(uu, "*", parts[3]), f]))
+    return sorted(names)
+
+
+def action_tree(log):
+    """The test targets' part of an action log as Xcode nests it (`get log --type action`): per section its path of
+    titles (a process's pid left out), result, testDetails keys, tests-passed line, skipped, its failure / skip
+    messages and the first line of its summary without times; not "Launch actions" nor the coverage steps"""
+    out = {}
+
+    def walk(n, path):
+        t = n.get("title") or ""
+        if not t.startswith(("Run test", "Writing")) and t.endswith(")"):
+            t = t.rsplit(" (", 1)[0]
+        path = path + (t,)
+        td = n.get("testDetails") or {}
+        # Swift Testing runs tests in parallel: Xcode's summary of one is often another test's line
+        swift_line = re.match(r"^\s*[\u200b◇✔✘➜↳━]", td.get("summary") or "")
+        summ = "" if swift_line else re.sub(r"\(\d+\.\d+ seconds\)|in [\d.]+ \([\d.]+\) seconds|at \d{4}-\d\d-\d\d [\d:.]+|\d+\.\d+s", "", (td.get("summary") or "").strip().split("\n")[-1])
+        out["/".join(path)] = (n.get("result"), sorted(k for k in td if k != "emittedOutput"), td.get("testsPassedString"),
+                               td.get("wasSkipped"), sorted((m.get("type"), m.get("title")) for m in n.get("messages") or []
+                                                            if m.get("type") != "notice"), summ, td.get("runnableUTI"))
+        for c in n.get("subsections") or []:
+            walk(c, path)
+    for n in (log or {}).get("subsections") or []:
+        if (n.get("title") or "").startswith("Test target "):
+            walk(n, ())
+    return out
+
+
 def compare(ours, theirs, name):
     so, sa = ours["summary"], theirs["summary"]
     for k in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures", "title"):
@@ -424,6 +500,26 @@ def compare(ours, theirs, name):
     for u in ddiff:
         print("     %s\n       ours:  %s\n       Apple: %s" % (u, json.dumps(details_tree(do[u])["runs"], ensure_ascii=False),
                                                          json.dumps(details_tree(da[u])["runs"], ensure_ascii=False)))
+    mo, ma = ours.get("metrics") or {}, theirs.get("metrics") or {}
+    if ma:
+        check(mo == ma, "%s vs Apple: performance metrics of %d tests (ids, names, units, polarity, baselines, limits, "
+              "number of measurements)" % (name, len(ma)))
+        for k in sorted(set(mo) | set(ma)):
+            if mo.get(k) != ma.get(k):
+                print("     %s\n       ours:  %s\n       Apple: %s" % (k, mo.get(k), ma.get(k)))
+    fo, fa = ours.get("diagnostics") or [], theirs.get("diagnostics") or []
+    if fa:
+        check(fo == fa, "%s vs Apple: diagnostics of the test targets (%d files: outputs, the app's, session logs)"
+              % (name, len(fa)))
+        if fo != fa:
+            print("     only ours:  %s\n     only Apple: %s" % (sorted(set(fo) - set(fa)), sorted(set(fa) - set(fo))))
+    ao, aa = action_tree(ours.get("action_log")), action_tree(theirs.get("action_log"))
+    if aa:
+        adiff = sorted(k for k in set(ao) | set(aa) if ao.get(k) != aa.get(k))
+        check(not adiff, "%s vs Apple: action log of the test targets (%d sections: processes, suites, test cases, "
+              "their results, tests-passed lines, failure and skip messages, summaries)" % (name, len(aa)))
+        for k in adiff:
+            print("     %s\n       ours:  %s\n       Apple: %s" % (k, ao.get(k), aa.get(k)))
     lo, la = ours.get("legacy_issues") or {}, theirs.get("legacy_issues") or {}
     both = sorted(set(lo) & set(la))
     ldiff = [u for u in both if lo[u] != la[u]]
@@ -479,7 +575,11 @@ def main(argv):
         b = os.path.join(work, name + ".xcresult")
         # XCTestDemo's products (its .xctestrun names the project and scheme) for runs that do not name their project
         # (a Swift package's results.json does: x86sim test --spm)
-        xcresult.write(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run.get("project") else None)
+        if isinstance(run, list):   # several devices (x86sim test --also-on): an action each
+            xcresult.write_many(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run[0].get("project") else None)
+            run = dict(run[0], targets=[t for x in run for t in x["targets"]])
+        else:
+            xcresult.write(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run.get("project") else None)
         local_check(b)
         built.append((name, b, run))
     rc, out, err = ssh("mktemp -d /tmp/x86sim-xcr.XXXXXX")

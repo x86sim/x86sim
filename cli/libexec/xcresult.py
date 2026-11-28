@@ -652,8 +652,10 @@ def expression(x):
 
 
 class Writer:
-    def __init__(self, summary, bundle, products_root):
+    def __init__(self, summary, bundle, products_root, final=None):
         self.s = summary
+        self.final = final or bundle   # where the bundle ends up (Xcode names its staging diagnostics by it)
+        self.multi_config = len({t.get("configuration") for t in summary.get("targets") or []}) > 1
         self.st = Store(bundle)
         info = xctestrun_info(summary, products_root)
         self.project = summary.get("project") or info.get("project") or guess_project(summary.get("targets") or [])
@@ -661,7 +663,7 @@ class Writer:
         self.plan = summary.get("test_plan") or info.get("plan") or self.scheme
         self.source = summary.get("source_root") or info.get("source")
         self.di = device_info(summary)
-        self.t0 = parse_time(summary.get("started"))
+        self.t0 = float(summary["started_unix"]) if summary.get("started_unix") else parse_time(summary.get("started"))
         self.issues = []
 
     def url(self, *parts):
@@ -687,9 +689,9 @@ class Writer:
             name = "kXCTAttachmentScreenRecording"   # xctest.py's recording of the test: XCTest's own name for it
             when = start
         else:
-            try:
-                when = min(max(os.path.getmtime(path), start), end)
-            except OSError:
+            try:   # XCTAttachment.timestamp (x86sim test's "time"), else when its file was written
+                when = min(max(float(a.get("time") or os.path.getmtime(path)), start), end)
+            except (OSError, ValueError):
                 when = end
         u = uid("attachment", path)
         ext = os.path.splitext(path)[1]
@@ -736,11 +738,15 @@ class Writer:
                          failureSummaryIDs=[], expectedFailureIDs=[], warningSummaryIDs=[]))
         return out
 
-    def test_summary(self, target, t, start, skips, arg=None):
+    def test_summary(self, target, t, start, skips, arg=None, run=None):
         """A test's ActionTestMetadata (+ its summary). Swift Testing's (x86sim test's "swift_testing" entries) are
         identified by their suite path (Second/Inner/same()), as Xcode does; arg: one test case of a parameterized one
         (Xcode keeps each: the same identifier, ?args=<argument ID hash> in its URL, its arguments)."""
         swift = bool(t.get("swift_testing"))
+        rep = t.get("repetition")
+        if run:   # one run of a repeated test (-test-iterations, retries): Xcode keeps each, ?i=<run> in its URL
+            t = dict(t, result=run.get("result"), duration=run.get("duration"), failures=run.get("failures") or [],
+                     expected_failures=run.get("expected_failures") or [], skip_message=run.get("skip_message"))
         if arg:
             t = dict(t, result=arg.get("result"), duration=arg.get("duration"), failures=arg.get("failures") or [],
                      expected_failures=arg.get("expected_failures") or [])
@@ -750,9 +756,16 @@ class Writer:
         ident = t["identifier"] if swift else "%s/%s" % (cls, name)
         symbol = ".".join(list(t.get("suite") or []) + [name]) if swift else "%s.%s" % (cls, name)
         url = self.url(target["name"], *ident.split("/")) if swift else self.url(target["name"], cls, t["name"])
+        query = []
+        if target.get("configuration") and self.multi_config:   # Xcode: a test plan's configuration, ?config=<name>
+            query.append("config=" + url_part(target["configuration"]))
         if arg:
-            url += "?args=" + arg["id"]
-        key = ident + ("?" + arg["id"] if arg else "")
+            query.append("args=" + arg["id"])
+        if run:
+            query.append("i=%d" % run["iteration"])
+        if query:
+            url += "?" + "&".join(query)
+        key = ident + ("?" + arg["id"] if arg else "") + ("?i=%d" % run["iteration"] if run else "")
         status = {"passed": "Success", "failed": "Failure", "skipped": "Skipped",
                   "expected_failure": "Expected Failure"}.get(t.get("result"), "Failure")
         lifetime = "deleteOnSuccess" if status == "Failure" else "keepAlways"
@@ -782,7 +795,7 @@ class Writer:
             if a.get("from") == "issue" and t.get("failures"):
                 issue_atts.append(att)   # the failure's own (its screenshot), shown with the failure
                 continue
-            acts.append((when, self.activity(a, att, when, start, (target["name"], key, i))))
+            acts.append((when, self.activity(a, att, when, start, (target["name"], target.get("configuration"), key, i))))
         if tree:
             for n, o in zip(tree, self.activity_tree(tree, placed, start, start + dur, lifetime)):
                 acts.append((n.get("start") or start, o))
@@ -801,12 +814,12 @@ class Writer:
                      sourceCodeContext=O("SourceCodeContext", location=loc, callStack=stack),
                      timestamp=T(start + dur), isTopLevelFailure=B(top), expression=expression(f.get("expression")))
         expected = [O("ActionTestExpectedFailure", failureReason=S(f.get("reason") or None),
-                      failureSummary=failure(f, uid("expected-issue", target["name"], key, i), [], False),
-                      isTopLevelFailure=B(True), uuid=S(uid("expected", target["name"], key, i)))
+                      failureSummary=failure(f, uid("expected-issue", target["name"], target.get("configuration"), key, i), [], False),
+                      isTopLevelFailure=B(True), uuid=S(uid("expected", target["name"], target.get("configuration"), key, i)))
                     for i, f in enumerate(t.get("expected_failures") or [])]
         for i, f in enumerate(t.get("failures") or []):
             msg = f.get("message") or ""
-            fails.append(failure(f, uid("failure", target["name"], key, i), issue_atts if i == 0 else [], True))
+            fails.append(failure(f, uid("failure", target["name"], target.get("configuration"), key, i), issue_atts if i == 0 else [], True))
             doc = None
             if f.get("file"):
                 ln = max(0, int(f.get("line") or 1) - 1)
@@ -830,14 +843,17 @@ class Writer:
                           typeName=S(a.get("value_type")), fullyQualifiedTypeName=S(a.get("value_full_type")),
                           isCollection=B(bool(a.get("is_collection")))))
                 for a in (arg or {}).get("args") or []]
+        reps = O("ActionTestRepetitionPolicySummary", iteration=I(run["iteration"]), totalIterations=I((rep or {}).get("total")),
+                 repetitionMode=S((rep or {}).get("mode"))) if run else None
+        perf = [performance_metric(m) for m in (t.get("metrics") or []) if not run] if not swift else []
         summ = O("ActionTestSummary", name=S(name), identifier=S(ident), identifierURL=S(url),
-                 testStatus=S(status), duration=D(dur), performanceMetrics=[], failureSummaries=fails, expectedFailures=expected,
+                 testStatus=S(status), duration=D(dur), performanceMetrics=perf, failureSummaries=fails, expectedFailures=expected,
                  skipNoticeSummary=skip, activitySummaries=acts, arguments=args, warningSummaries=[], documentation=[],
-                 trackedIssues=[], tags=[])
+                 trackedIssues=[], tags=[], repetitionPolicySummary=reps)
         ref = self.st.obj(summ)
         return O("ActionTestMetadata", name=S(name), identifier=S(ident), identifierURL=S(url),
                  testStatus=S(status), duration=D(dur), summaryRef=Ref(ref, "ActionTestSummary"),
-                 performanceMetricsCount=I(0), failureSummariesCount=I(len(fails)), activitySummariesCount=I(len(acts))), dur
+                 performanceMetricsCount=I(len(perf)), failureSummariesCount=I(len(fails)), activitySummariesCount=I(len(acts))), dur
 
     def group(self, target, ident, name, subtests, dur):
         return O("ActionTestSummaryGroup", name=S(name), identifier=S(ident), identifierURL=S(self.url(target, *ident.split("/"))),
@@ -848,8 +864,12 @@ class Writer:
         skips = skip_locations(target.get("log"))
         classes, order = {}, []
         tests = target.get("tests") or []
-        # XCTest runs the tests after the process is up: they end when the target's run ends
+        # each test where it really started (x86sim test's "started": libsimshim's / libsimswt's wall clock); without
+        # that, the tests run after the process is up and end when the target's run ends
         clock = max(start, start + float(target.get("duration") or 0) - sum(float(t.get("duration") or 0) for t in tests))
+
+        def when(t):
+            return max(float(t["started"]), start) if t.get("started") else clock
         # Swift Testing's tests: beside "All tests", in their suites' groups (nested, as Xcode keeps them)
         swift = {"tests": [], "suites": {}, "order": []}
         for t in tests:
@@ -862,8 +882,9 @@ class Writer:
                     node["order"].append(s)
                 node = node["suites"][s]
             for a in t.get("arguments") or [None]:
-                md, dur = self.test_summary(target, t, clock, skips, a)
-                clock += dur
+                at = when(a or t)
+                md, dur = self.test_summary(target, t, at, skips, a)
+                clock = at + dur
                 node["tests"].append((md, dur))
 
         def swift_nodes(node):
@@ -881,9 +902,11 @@ class Writer:
             if cls not in classes:
                 classes[cls] = []
                 order.append(cls)
-            md, dur = self.test_summary(target, t, clock, skips)
-            clock += dur
-            classes[cls].append((md, dur))
+            for r in t.get("iterations") or [None]:
+                at = when(r) if r and r.get("started") else when(t) if not r or r["iteration"] == 1 else clock
+                md, dur = self.test_summary(target, t, at, skips, run=r)
+                clock = at + dur
+                classes[cls].append((md, dur))
         groups, total = [], 0.0
         for cls in order:
             dur = sum(d for _, d in classes[cls])
@@ -896,7 +919,7 @@ class Writer:
         for i, a in enumerate(target.get("attachments") or []):
             r = self.attachment(a, start, end, "keepAlways")
             if r:
-                bundle.f["activitySummaries"].append(self.activity(a, r[0], r[1], start, (target["name"], "_run", i)))
+                bundle.f["activitySummaries"].append(self.activity(a, r[0], r[1], start, (target["name"], target.get("configuration"), "_run", i)))
         # Xcode: a target without XCTest tests has an empty "All tests"
         top = self.group(target["name"], "All tests", "All tests",
                          [bundle] if groups or bundle.f["activitySummaries"] or not swift_tests else [], total)
@@ -905,45 +928,279 @@ class Writer:
                  testKind=S(KINDS.get(target.get("kind"), "app hosted")), tests=[top] + swift_tests, diagnosticsDirectoryName=S(""),
                  failureSummaries=[], testLanguage=S(""), testRegion=S(""))
 
-    def log_section(self, target, start):
-        """The target's part of the action log: its process's output, as Xcode keeps it."""
+    def build_log(self, log):
+        """The build's ActivityLogSection (log: `xcresulttool get log --type build`'s shape, which the xcodebuild
+        stand-in writes from Swift Build's tasks): its id"""
+        def message(m):
+            loc = None
+            if (m.get("location") or {}).get("path"):
+                lc = m["location"]
+                loc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                        url=S(text_location(lc["path"], lc.get("line"), lc.get("column"))))
+            return O("ActivityLogMessage", type=S(m.get("type") or "notice"), title=S(m.get("title")),
+                     shortTitle=S(m.get("shortTitle")), category=S(m.get("category")), location=loc,
+                     annotations=[O("ActivityLogMessageAnnotation", title=S(a.get("title")))
+                                  for a in m.get("annotations") or []])
+
+        def section(n, top=False):
+            f = dict(domainType=S(n.get("domainType")), title=S(n.get("title")), startTime=T(n.get("startTime")),
+                     duration=D(n.get("duration") or 0), result=S(n.get("result")),
+                     subsections=[section(x) for x in n.get("subsections") or []],
+                     messages=[message(m) for m in n.get("messages") or []], attachments=[])
+            c = n.get("commandInvocationDetails")
+            if c and not top:
+                f.update(commandDetails=S(c.get("commandDetails")), emittedOutput=S(c.get("emittedOutput") or ""),
+                         exitCode=I(c.get("exitCode") or 0))
+                if n.get("location"):
+                    f["location"] = O("DocumentLocation", concreteTypeName=S("DVTDocumentLocation"),
+                                      url=S("file://" + urllib.parse.quote(n["location"])))
+                return O("ActivityLogCommandInvocationSection", **f)
+            return O("ActivityLogSection", **f)
+
+        return self.st.obj(section(log, True))
+
+    @staticmethod
+    def output(target):
+        """A test process's output as Xcode keeps it: without the lines x86Sim's own pieces print (libsimshim,
+        the translator, dyld_sim's note on DYLD_SHARED_REGION)"""
         try:
             with open(target.get("log") or "", errors="replace") as f:
-                out = f.read()
+                return "".join(ln for ln in f if not X86SIM_LINE.match(ln))
         except OSError:
-            out = ""
-        res = "succeeded" if target.get("result") == "passed" else "failed"
+            return ""
+
+    def log_section(self, target, start):
+        """The target's part of the action log, as Xcode keeps it: "Test target T" > the test process ("XCTestDemo
+        (pid)", "xctest (pid)", "T-Runner (pid)": its runnable, its whole output, Xcode's tests-passed line) > "Run
+        test suite All tests" > ... > "Run test case t()", each with its own lines of the output, its summary line, a
+        test case's failures ("test failure") and skip ("test skipped") as messages (log_tree())."""
+        out = self.output(target)
+        # Xcode's sections say whether the process ran, not whether its tests passed
+        res = "failed" if target.get("error") else "succeeded"
         tests = target.get("tests") or []
-        passed = sum(1 for t in tests if t.get("result") == "passed")
+        suites = log_tree(out, tests, start)
+        top = next((n for n in suites if n["kind"] == "suite"), None)
+        swift = swift_log_tree(out, tests, start)
+        passed = top["passed_string"] if top else "%d test%s total, %d passed" % (
+            len(tests), "" if len(tests) == 1 else "s", sum(1 for t in tests if t.get("result") == "passed"))
+        if swift:
+            # Xcode counts the XCTest suite and Swift Testing's top-level suites (not free test functions)
+            counts = [top["counts"]] if top else []
+            counts += [n["counts"] for n in swift if n["kind"] == "suite"]
+            passed = passed_string(*[sum(c[i] for c in counts) for i in range(5)])
+        suites = suites + swift
+        dur = float(target.get("duration") or 0)
+        subs = [self.log_node(n, res) for n in suites]
+        if target.get("session_log"):
+            # Xcode: where it writes the session log (in the bundle's staging area, while it runs)
+            sess = "%s/Staging/1_Test/Diagnostics/%s/%s" % (self.final, "/".join(self.diag_dirs(target)), self.session_name(target))
+            subs.insert(0, O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection"),
+                             title=S("Writing diagnostic log for test runner launch."), startTime=T(start),
+                             duration=D(0.0), result=S("succeeded"), subsections=[], attachments=[],
+                             commandDetails=S(sess), emittedOutput=S(""), exitCode=I(0),
+                             messages=[O("ActivityLogMessage", type=S("notice"), title=S(sess), shortTitle=S(sess),
+                                         location=O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                                                    url=S("file://" + urllib.parse.quote(sess))), annotations=[])]))
         worker = O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection.Worker"),
-                   title=S("%s (%s)" % (target["name"], target.get("pid") or 0)), startTime=T(start),
-                   duration=D(target.get("duration") or 0), result=S(res), subsections=[], messages=[], attachments=[],
-                   emittedOutput=S(out), testsPassedString=S("%d test%s total, %d passed" % (len(tests), "" if len(tests) == 1 else "s", passed)),
-                   wasSkipped=B(False))
+                   title=S("%s (%s)" % (target.get("process") or target["name"], target.get("pid") or 0)),
+                   startTime=T(start), duration=D(dur), result=S(res),
+                   subsections=subs, messages=[], attachments=[],
+                   emittedOutput=S(out), testsPassedString=S(passed), wasSkipped=B(False),
+                   runnablePath=S(target.get("runnable")),
+                   runnableUTI=S(("com.apple.application-bundle" if (target.get("runnable") or "").endswith(".app")
+                                  else "public.unix-executable") if target.get("runnable") else None))
         return O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.unit.cocoaUnitTest"),
-                 title=S("Test target %s" % target["name"]), startTime=T(start), duration=D(target.get("duration") or 0),
+                 title=S("Test target %s" % target["name"]), startTime=T(start), duration=D(dur),
                  result=S(res), subsections=[worker], messages=[], attachments=[], wasSkipped=B(False))
 
+    def log_node(self, n, res):
+        msgs = []
+        for m in n.get("messages") or []:
+            loc = None
+            if m.get("file"):
+                ln = max(0, int(m.get("line") or 1) - 1)
+                loc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                        url=S("file://%s#EndingLineNumber=%d&StartingLineNumber=%d" % (urllib.parse.quote(m["file"]), ln, ln)))
+            msgs.append(O("ActivityLogMessage", type=S(m["type"]), title=S(m["title"]), shortTitle=S(m["title"]),
+                          location=loc, annotations=[]))
+        f = dict(domainType=S("com.apple.dt.IDE.UnitTestLogSection"), title=S(n["title"]), startTime=T(n["start"]),
+                 duration=D(n["duration"]), result=S(res), subsections=[self.log_node(c, res) for c in n["children"]],
+                 messages=msgs, attachments=[], emittedOutput=S(n["output"]), summary=S(n["summary"]),
+                 suiteName=S(n["suite"]), wasSkipped=B(n.get("skipped", False)))
+        if n["kind"] == "suite":
+            f["testsPassedString"] = S(n["passed_string"])
+        else:
+            f["testName"] = S(n["test"])
+        return O("ActivityLogUnitTestSection", **f)
+
+    @staticmethod
+    def app_launches(target, bid):
+        """(start, end) of every "Launch <bid>" activity of the target's tests"""
+        out = []
+
+        def walk(nodes):
+            for n in nodes or []:
+                if n.get("title") == "Launch " + bid and n.get("start"):
+                    out.append((float(n["start"]), float(n.get("finish") or n["start"])))
+                walk(n.get("children"))
+        for t in target.get("tests") or []:
+            walk(t.get("activities"))
+        return out
+
+    def launch_actions(self, targets):
+        """Xcode's "Launch actions": per test target, the device, the install of its host ("Installing built
+        products") and the launch of its test process ("Launching T": its environment, path and pid), from x86sim
+        test's "launch" records"""
+        di = self.di
+        dev = [("Platform: %s" % di["pdesc"]), "Device Identifier: %s" % di["udid"],
+               "Operating System Version: %s (%s)" % (di["version"], di["build"]) if di["build"] else
+               "Operating System Version: %s" % di["version"],
+               "Model: %s (%s)" % (di["model"], di["code"]) if di["code"] else "Model: %s" % di["model"],
+               "Target Architecture: %s" % di["arch"]]
+
+        def notes(lines):
+            return [O("ActivityLogMessage", type=S("notice"), title=S(x), shortTitle=S(x), annotations=[]) for x in lines]
+        subs = []
+        for t in targets:
+            ln = t.get("launch")
+            if not ln:
+                continue
+            start = float(ln["time"])
+            kids = []
+            ins = ln.get("install") or [start, start]   # Xcode installs before every launch (a logic test's: nothing)
+            if ins:
+                kids.append(O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                              title=S("Installing built products"), startTime=T(ins[0]), duration=D(ins[1] - ins[0]),
+                              result=S("succeeded"), subsections=[], attachments=[], commandDetails=S(""),
+                              emittedOutput=S(""), exitCode=I(0),
+                              messages=notes(["Installing on %s" % di["name"], "Successfully installed"])))
+            env = "".join("%s=%s\n" % (k, v) for k, v in (ln.get("env") or {}).items()
+                          if not k.startswith(("X86SIM_",)))
+            details = "Environment variables:\n" + env
+            if ln.get("args"):
+                details += "\nArguments:\n" + "".join("%s\n" % a for a in ln["args"])
+            what = ln.get("bid") or t["name"]
+            kids.append(O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Launching %s" % t["name"]), startTime=T(start), duration=D(ln.get("duration") or 0),
+                          result=S("succeeded"), subsections=[], attachments=[], commandDetails=S(details),
+                          emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Launching %s" % (t["name"] if not ln.get("bid") else what),
+                                          "Launching from %s" % ln.get("path"),
+                                          "Successfully launched %s" % t["name"]]
+                                         + (["Process with pid %s launched" % ln["pid"]] if ln.get("pid") else []))))
+            first = min([start] + ([ins[0]] if ins else []))
+            subs.append(O("ActivityLogSection", domainType=S("com.apple.dt.IDE.LogSection"), title=S("Launch %s" % t["name"]),
+                          startTime=T(first), duration=D(start + float(ln.get("duration") or 0) - first),
+                          result=S("succeeded"), subsections=kids, messages=notes(dev), attachments=[]))
+            # each launch of the app under test (XCUIApplication: the tests' "Launch <bundle id>" activities)
+            tg = ln.get("target")
+            if tg:
+                app = os.path.splitext(os.path.basename(tg["path"]))[0]
+                for x in sorted(self.app_launches(t, tg["bid"])):
+                    subs.append(O("ActivityLogSection", domainType=S("com.apple.dt.IDE.LogSection"), title=S("Launch %s" % app),
+                                  startTime=T(x[0]), duration=D(x[1] - x[0]), result=S("succeeded"), messages=notes(dev),
+                                  attachments=[], subsections=[
+                        O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Installing built products"), startTime=T(x[0]), duration=D(0.0), result=S("succeeded"),
+                          subsections=[], attachments=[], commandDetails=S(""), emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Installing on %s" % di["name"], "Successfully installed"])),
+                        O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Launching %s" % app), startTime=T(x[0]), duration=D(x[1] - x[0]), result=S("succeeded"),
+                          subsections=[], attachments=[], commandDetails=S(""), emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Launching %s" % tg["bid"], "Launching from %s" % tg["path"],
+                                          "Successfully launched %s" % app]))]))
+        if not subs:
+            return None
+        t0 = min(float(t["launch"].get("install", [t["launch"]["time"]])[0] if t["launch"].get("install") else t["launch"]["time"])
+                 for t in targets if t.get("launch"))
+        t1 = max(float(t["launch"]["time"]) + float(t["launch"].get("duration") or 0) for t in targets if t.get("launch"))
+        return O("ActivityLogSection", domainType=S("Xcode.IDEActivityLogDomainType.LaunchLog"), title=S("Launch actions"),
+                 startTime=T(t0), duration=D(t1 - t0), result=S("succeeded"), subsections=subs, messages=[], attachments=[])
+
+    def coverage_log(self, cov):
+        """Xcode's "Generating coverage report" steps (from x86sim test's coverage record): the profiles, their merge
+        with llvm-profdata, the source files with line coverage, an entry per product"""
+        if not cov or not cov.get("started") or not cov.get("products"):
+            return None
+
+        def notes(lines):
+            return [O("ActivityLogMessage", type=S("notice"), title=S(x), shortTitle=S(x), annotations=[]) for x in lines]
+
+        def step(title, t0, t1, msgs=(), details=True):
+            f = dict(domainType=S("com.apple.dt.IDE.UnitTestLogSection.Coverage"), title=S(title), startTime=T(t0),
+                     duration=D(max(0.0, t1 - t0)), result=S("succeeded"), subsections=[], attachments=[],
+                     messages=notes(msgs))
+            if details:
+                f["wasSkipped"] = B(False)
+            return O("ActivityLogUnitTestSection", **f)
+        t0, tm, t1 = float(cov["started"]), float(cov.get("merged") or cov["started"]), float(cov.get("finished") or cov["started"])
+        files = sorted({f["file"] for p in cov["products"] for f in p.get("files") or []})
+        ver = " (%s)" % cov["profdata_version"] if cov.get("profdata_version") else ""
+        subs = [step("Downloading profiles from %s" % self.di["name"], t0, t0),
+                step("Merging %d profiles using llvm-profdata%s" % (cov.get("profiles") or 0, ver), t0, tm, details=False),
+                step("Pre-processing target built products", tm, tm),
+                step("Processing source file data", tm, t1,
+                     ["Archived line-level coverage for %d file(s):\n%s" % (len(files), "\n".join(files))]),
+                step("Generating target entries", t1, t1,
+                     ["Generating entry for target %s" % p["name"] for p in cov["products"]])]
+        return O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection.Coverage"),
+                 title=S("Generating coverage report"), startTime=T(t0), duration=D(max(0.0, t1 - t0)),
+                 result=S("succeeded"), subsections=subs, messages=[], attachments=[], wasSkipped=B(False))
+
+    @staticmethod
+    def session_name(target):
+        """Xcode's name for a target's session log: Session-<Target>-<YYYY-MM-DD_HHMMSS>-<6 letters>.log"""
+        when = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(float(target.get("started") or 0) or time.time()))
+        tag = base64.b64encode(hashlib.sha256(("%s %s" % (target["name"], when)).encode()).digest()).decode()
+        return "Session-%s-%s-%s.log" % (target["name"], when, re.sub(r"[^A-Za-z0-9]", "x", tag)[:6])
+
+    def diag_dirs(self, target):
+        """Xcode's diagnostics folders of a test target: <T>-<UUID>-Configuration-Test Scheme Action-Iteration-1 /
+        <T>-<UUID>"""
+        u1 = uid("diag-config", self.s.get("out"), target["name"], target.get("configuration"))
+        u2 = uid("diag-run", self.s.get("out"), target["name"], target.get("configuration"))
+        return ("%s-%s-Configuration-%s-Iteration-1" % (target["name"], u1, target.get("configuration") or RUN_NAME),
+                "%s-%s" % (target["name"], u2))
+
     def diagnostics(self):
+        """Diagnostics, laid out as Xcode does (diag_dirs()): the test process's output
+        (StandardOutputAndStandardError.txt), the UI tests' app's (StandardOutputAndStandardError-<bundle id>.txt,
+        libsimshim's) and XCTest's debug log (the session log: x86sim test's <Target>.session.log, libsimshim's)"""
         ents = []
         for t in self.s.get("targets") or []:
+            files = []
+            if t.get("session_log") and os.path.isfile(t["session_log"]):
+                oid, _ = self.st.file(t["session_log"])
+                files.append((self.session_name(t), ("file", oid)))
             if t.get("log") and os.path.isfile(t["log"]):
-                oid, _ = self.st.file(t["log"])
-                d = self.st.directory([("StandardOutputAndStandardError.txt", ("file", oid))])
-                ents.append((t["name"], ("dir", d)))
+                files.append(("StandardOutputAndStandardError.txt", ("file", self.st.put(self.output(t).encode()))))
+            ao = t.get("app_output") or {}
+            if ao.get("path") and os.path.isfile(ao["path"]):
+                files.append(("StandardOutputAndStandardError-%s.txt" % ao.get("bid"),
+                              ("file", self.st.put(self.output({"log": ao["path"]}).encode()))))
+            if files:
+                outer, inner = self.diag_dirs(t)
+                ents.append((outer, ("dir", self.st.directory([(inner, ("dir", self.st.directory(files)))]))))
         return self.st.directory(ents) if ents else None
 
     def write(self):
         s, di = self.s, self.di
         targets = s.get("targets") or []
-        clock, testables, logs = self.t0, [], []
+        clock, logs = self.t0, []
+        runs = {}   # a test plan's configurations: one run summary each, in the order they ran
         for t in targets:
-            testables.append(self.testable(t, clock))
-            logs.append(self.log_section(t, clock))
-            clock += float(t.get("duration") or 0)
+            at = max(float(t["started"]), self.t0) if t.get("started") else clock   # its real start (x86sim test's)
+            runs.setdefault(t.get("configuration") or RUN_NAME, []).append(self.testable(t, at))
+            logs.append(self.log_section(t, at))
+            clock = at + float(t.get("duration") or 0)
+        launches, covlog = self.launch_actions(targets), self.coverage_log(s.get("coverage"))
+        if covlog:
+            logs.insert(0, covlog)
+        if launches:
+            logs.insert(0, launches)
         end = self.t0 + float(s.get("duration") or (clock - self.t0))
         tests_ref = self.st.obj(O("ActionTestPlanRunSummaries", summaries=[
-            O("ActionTestPlanRunSummary", name=S(RUN_NAME), testableSummaries=testables)]))
+            O("ActionTestPlanRunSummary", name=S(n), testableSummaries=ts) for n, ts in (runs.items() or [(RUN_NAME, [])])]))
         failed = s.get("result") != "passed"
         log_ref = self.st.obj(O("ActivityLogSection", domainType=S("com.apple.dt.unit.cocoaUnitTest"),
                                 title=S("Test %s" % self.scheme), startTime=T(self.t0), duration=D(end - self.t0),
@@ -955,14 +1212,22 @@ class Writer:
         nf = c.get("failed", sum(1 for x in all_tests if x.get("result") == "failed"))
         ns = c.get("skipped", sum(1 for x in all_tests if x.get("result") == "skipped"))
 
-        def metrics(tests=True):
-            return O("ResultMetrics", analyzerWarningCount=I(0), errorCount=I(0), warningCount=I(0),
+        # the build's errors and warnings (the xcodebuild stand-in's build log: x86sim test --build-log), and Xcode's
+        # own error when the build failed: the test action is cancelled
+        b_err = [build_issue(i) for i in s.get("build_issues") or [] if i.get("severity") == "error"]
+        b_warn = [build_issue(i) for i in s.get("build_issues") or [] if i.get("severity") == "warning"]
+        built_failed = s.get("build") == "failed"
+        a_err = [O("IssueSummary", issueType=S("Uncategorized"), message=S("Testing cancelled because the build failed."))] \
+            if built_failed else []
+
+        def metrics(tests=True, errors=0, warnings=0):
+            return O("ResultMetrics", analyzerWarningCount=I(0), errorCount=I(errors), warningCount=I(warnings),
                      testsCount=I(n if tests else 0), testsFailedCount=I(nf if tests else 0),
                      testsSkippedCount=I(ns if tests else 0))
 
-        def issues(fails):
-            return O("ResultIssueSummaries", analyzerWarningSummaries=[], errorSummaries=[], testFailureSummaries=fails,
-                     warningSummaries=[], testWarningSummaries=[])
+        def issues(fails, errors=(), warnings=()):
+            return O("ResultIssueSummaries", analyzerWarningSummaries=[], errorSummaries=list(errors),
+                     testFailureSummaries=fails, warningSummaries=list(warnings), testWarningSummaries=[])
 
         nocov = O("CodeCoverageInfo", hasCoverageData=B(False))
         cov, pct = nocov, None
@@ -974,17 +1239,26 @@ class Writer:
             cov = O("CodeCoverageInfo", hasCoverageData=B(True), reportRef=Ref(self.st.put(rep[0])), archiveRef=Ref(arch))
             pct = rep[1] / rep[2] if rep[2] else 0.0
         self.coverage_fraction = pct
-        action = O("ActionResult", resultName=S("action"), status=S("failed" if failed else "succeeded"), metrics=metrics(),
-                   issues=issues(self.issues), coverage=cov, logRef=Ref(log_ref, "ActivityLogSection"),
+        action = O("ActionResult", resultName=S("action"),
+                   status=S("cancelled" if built_failed else "failed" if failed else "succeeded"),
+                   metrics=metrics(errors=len(a_err)),
+                   issues=issues(self.issues, a_err), coverage=cov, logRef=Ref(log_ref, "ActivityLogSection"),
                    testsRef=Ref(tests_ref, "ActionTestPlanRunSummaries"), diagnosticsRef=Ref(diag) if diag else None)
-        build = O("ActionResult", resultName=S("build"), status=S("succeeded"), metrics=metrics(False), issues=issues([]),
-                  coverage=nocov)
+        # Xcode's build action: "notRequested" for test-without-building (x86sim test), "succeeded" / "failed" when the
+        # run built the products first (the xcodebuild stand-in's test: x86sim test --built / --build-log), with the
+        # build's activity log when there is one
+        blog = self.build_log(s.get("build_log")) if s.get("build_log") else None
+        build = O("ActionResult", resultName=S("build"), status=S(s.get("build") or "notRequested"),
+                  metrics=metrics(False, len(b_err), len(b_warn)), issues=issues([], b_err, b_warn), coverage=nocov,
+                  logRef=Ref(blog, "ActivityLogSection") if blog else None)
         dest = O("ActionRunDestinationRecord", displayName=S(di["name"]), targetArchitecture=S(di["arch"]),
                  targetDeviceRecord=device_record(di), localComputerRecord=host_record(),
                  targetSDKRecord=O("ActionSDKRecord", name=S(di["sdkname"]), identifier=S(di["sdk"]),
                                    operatingSystemVersion=S(di["version"]), isInternal=B(False)))
         rec = O("ActionRecord", schemeCommandName=S("Test"), schemeTaskName=S("Action"),
-                title=S("Testing project %s with scheme %s" % (self.project, self.scheme)), startedTime=T(self.t0),
+                # test-without-building's action has no title (Xcode 27.2), xcodebuild test's names the project
+                title=S("Testing project %s with scheme %s" % (self.project, self.scheme)) if s.get("build") else None,
+                startedTime=T(self.t0),
                 endedTime=T(end), runDestination=dest, buildResult=build, actionResult=action, testPlanName=S(self.plan))
         ws = os.path.join(self.source, self.project + ".xcodeproj") if self.source else self.project + ".xcodeproj"
         meta = self.st.obj(O("ActionsInvocationMetadata", creatingWorkspaceFilePath=S(ws),
@@ -992,11 +1266,286 @@ class Writer:
                              schemeIdentifier=O("EntityIdentifier", entityName=S(self.scheme),
                                                 containerName=S("%s project" % self.project), entityType=S("scheme"),
                                                 sharedState=S("shared"))))
-        top = metrics()
+        top = metrics(errors=len(b_err) + len(a_err), warnings=len(b_warn))
         top.f["totalCoveragePercentage"] = D(pct)
+        iss = issues(self.issues, b_err + a_err, b_warn)
+        self.parts = {"action": rec, "metrics": top, "issues": iss, "meta": meta}   # for merge()
         root = self.st.obj(O("ActionsInvocationRecord", metadataRef=Ref(meta, "ActionsInvocationMetadata"),
-                             metrics=top, issues=issues(self.issues), actions=[rec]))
+                             metrics=top, issues=iss, actions=[rec]))
         return root
+
+
+def text_location(path, line=None, column=None, when=None):
+    """A DVTTextDocumentLocation URL as Xcode writes one for a build issue (0-based line and column)"""
+    frag = []
+    if line:
+        ln = max(0, int(line) - 1)
+        col = max(0, int(column or 1) - 1)
+        frag = ["EndingColumnNumber=%d" % col, "EndingLineNumber=%d" % ln, "StartingColumnNumber=%d" % col,
+                "StartingLineNumber=%d" % ln]
+        if when:
+            frag.append("Timestamp=%.6f" % (when - 978307200))   # seconds since 2001 (Apple's reference date)
+    return "file://%s%s" % (urllib.parse.quote(path), "#" + "&".join(frag) if frag else "")
+
+
+def build_issue(i):
+    """IssueSummary of a build error / warning (the xcodebuild stand-in's build-log.json "issues")"""
+    doc = None
+    if i.get("file"):
+        doc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                url=S(text_location(i["file"], i.get("line"), i.get("column"), i.get("time"))))
+    return O("IssueSummary", issueType=S(i.get("type") or "Uncategorized"), message=S(i.get("message") or ""),
+             documentLocationInCreatingWorkspace=doc)
+
+
+X86SIM_LINE = re.compile(r"^(simshim: |arm64host: |a64: |DYLD_SHARED_REGION=avoid not supported for simulator$)")
+SUITE_START = re.compile(r"^Test Suite '(.+)' started at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\.?$")
+SUITE_END = re.compile(r"^Test Suite '(.+)' (passed|failed) at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\.?$")
+EXECUTED = re.compile(r"^\s+Executed (\d+) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures? \((\d+) unexpected\)")
+ISSUE_LINE = re.compile(r"^.*:\d+: (?:(?:error|warning): )?-\[")   # an issue or a skip, as XCTest prints them
+CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started\.$")
+CASE_END = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped) \((\d+\.\d+) seconds\)\.$")
+
+
+def log_time(ts):
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    except ValueError:
+        return None
+
+
+def passed_string(n, skipped, failures, unexpected, expected=0):
+    """Xcode's tests-passed line from XCTest's "Executed N tests, with S skipped and F failures (U unexpected)": the
+    passed count leaves out the skipped, failed and unexpected ones, failures are not named, an unexpected one (a
+    thrown error) is an "uncaught exception" """
+    out = "%d test%s total, %d passed" % (n, "" if n == 1 else "s", max(0, n - skipped - failures - unexpected - expected))
+    if skipped:
+        out += ", %d skipped" % skipped
+    if expected:   # tests with a known issue / XCTExpectFailure (Xcode counts them, failed or not)
+        out += ", %d expected failure%s" % (expected, "" if expected == 1 else "s")
+    if unexpected:
+        out += ", %d uncaught exception%s" % (unexpected, "" if unexpected == 1 else "s")
+    return out
+
+
+def swift_log_tree(text, tests, start):
+    """Swift Testing's suites and tests in Xcode's action log (beside XCTest's "All tests"): "Run test suite <Suite>"
+    (nested as the suite path; tests-passed line over its tests), "Run test case <name>" (one per argument of a
+    parameterized test; a test outside any suite at the top, without a suite name): its console lines (Swift
+    Testing's "◇ / ✔ / ✘ / ➜ Test name ..."), the last as its summary, its issues ("test failure") and skip ("test
+    skipped: Test skipped: <comment>"). Swift Testing runs tests in parallel, and Xcode's own summaries of them are
+    lines of other tests; these are the test's own."""
+    lines = text.splitlines(True)
+    suites, roots = {}, []
+
+    def suite(path):
+        if path in suites:
+            return suites[path]
+        n = {"kind": "suite", "title": "Run test suite " + path[-1], "suite": path[-1], "test": None, "start": start,
+             "duration": 0.0, "output": "", "summary": "", "passed_string": "", "messages": [], "children": [],
+             "counts": [0, 0, 0, 0, 0], "skipped": False}
+        suites[path] = n
+        (suite(path[:-1])["children"] if len(path) > 1 else roots).append(n)
+        return n
+
+    for t in tests:
+        if not t.get("swift_testing"):
+            continue
+        name = t.get("name") or ""
+        mine = [ln for ln in lines if re.search(r"(Test|Suite) %s( |$)" % re.escape(name), ln)
+                and re.match(r"^[◇✔✘➜↳━􀟈􁁛􀢄􀙟􀄵]", ln.lstrip())]
+        path = tuple(t.get("suite") or ())
+        for a in t.get("arguments") or [None]:
+            r = (a or t).get("result") or t.get("result")
+            fails = (a or {}).get("failures") if a else t.get("failures")
+            n = {"kind": "case", "title": "Run test case " + name, "suite": path[-1] if path else None, "test": name,
+                 "start": float((a or t).get("started") or t.get("started") or start),
+                 "duration": float((a or t).get("duration") or 0.0), "output": "".join(mine),
+                 "summary": mine[-1] if mine else "", "messages": [], "children": [], "skipped": r == "skipped"}
+            for f in ((a or {}).get("expected_failures") if a else t.get("expected_failures")) or []:
+                n["messages"].append({"type": "test expected failure", "title": "Expected failure: %s" % (f.get("message") or ""),
+                                      "file": f.get("file"), "line": f.get("line")})
+            for f in fails or []:
+                n["messages"].append({"type": "test failure", "title": f.get("message") or "", "file": f.get("file"),
+                                      "line": f.get("line")})
+            if r == "skipped":
+                m = t.get("skip_message")
+                n["messages"].append({"type": "test skipped", "title": "Test skipped: %s" % m if m else "Test skipped"})
+            (suite(path)["children"] if path else roots).append(n)
+        for k in range(1, len(path) + 1):   # Xcode's count: one per test function
+            c = suite(path[:k])["counts"]
+            c[0] += 1
+            c[1] += t.get("result") == "skipped"
+            c[2] += t.get("result") == "failed"
+            c[4] += bool(t.get("expected_failures"))
+    for n in suites.values():
+        own = [ln for ln in lines if re.search(r"Suite %s (started|passed|failed)" % re.escape(n["suite"]), ln)]
+        n["output"], n["summary"] = "".join(own), own[-1] if own else ""
+        n["counts"] = tuple(n["counts"])
+        n["passed_string"] = passed_string(*n["counts"])
+        kids = [c for c in n["children"]]
+        if kids:
+            n["start"] = min(c["start"] for c in kids)
+            n["duration"] = max(c["start"] + c["duration"] for c in kids) - n["start"]
+    return roots
+
+
+def log_tree(text, tests, start):
+    """XCTest's suites and test cases in a test process's output, as Xcode's action log nests them: [{"kind" (suite /
+    case), "title", "suite", "test", "start", "duration", "output" (its lines), "summary", "passed_string",
+    "messages", "skipped", "children"}]. A test case's start is when x86sim test saw it run ("started"), its failures
+    and skip message from results.json."""
+    by_name = {}
+    for t in tests:
+        if not t.get("swift_testing"):
+            by_name[((t.get("class") or "").split(".")[-1], t.get("name"))] = t
+    roots, stack = [], []
+    lines = text.splitlines(True)
+    clock = start
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        bare = ln.rstrip("\n")
+        for n in stack:
+            n["output"] += ln
+        if stack and stack[-1]["kind"] == "case":
+            # a test case's summary: its lines after the last issue (Xcode's), its end line with them
+            stack[-1]["tail"] = "" if ISSUE_LINE.match(bare) else stack[-1]["tail"] + ln
+        m = SUITE_START.match(bare)
+        if m:
+            at = log_time(m.group(2)) or clock
+            node = {"kind": "suite", "title": "Run test suite " + m.group(1), "suite": m.group(1), "test": None,
+                    "start": at, "duration": 0.0, "output": ln, "summary": "", "passed_string": "", "messages": [],
+                    "children": [], "counts": (0, 0, 0, 0, 0)}
+            (stack[-1]["children"] if stack else roots).append(node)
+            stack.append(node)
+            i += 1
+            continue
+        m = SUITE_END.match(bare)
+        if m and stack and stack[-1]["kind"] == "suite" and stack[-1]["suite"] == m.group(1):
+            node = stack.pop()
+            summary = ln
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            e = EXECUTED.match(nxt)
+            if e:
+                summary += nxt
+                for n in stack + [node]:
+                    n["output"] += nxt
+                i += 1
+                def expected(n):
+                    return sum(expected(c) for c in n["children"]) if n["kind"] == "suite" else int(n.get("expected", False))
+                node["counts"] = (int(e.group(1)), int(e.group(2) or 0), int(e.group(3)), int(e.group(4)), expected(node))
+                node["passed_string"] = passed_string(*node["counts"])
+            node["summary"] = summary
+            at = log_time(m.group(3))
+            if at:
+                node["duration"] = max(0.0, at - node["start"])
+                clock = at
+            i += 1
+            continue
+        m = CASE_START.match(bare)
+        if m:
+            cls = m.group(1).split(".")[-1]
+            t = by_name.get((cls, m.group(2)))
+            at = float(t["started"]) if t and t.get("started") else clock
+            node = {"kind": "case", "title": "Run test case %s()" % m.group(2), "suite": cls, "test": m.group(2) + "()",
+                    "start": at, "duration": 0.0, "output": ln, "summary": "", "messages": [], "children": [],
+                    "skipped": False, "_t": t, "tail": ""}
+            (stack[-1]["children"] if stack else roots).append(node)
+            stack.append(node)
+            i += 1
+            continue
+        m = CASE_END.match(bare)
+        if m and stack and stack[-1]["kind"] == "case":
+            node = stack.pop()
+            node["summary"] = node.pop("tail")
+            node["duration"] = float(m.group(4))
+            clock = node["start"] + node["duration"]
+            t = node.pop("_t")
+            if t:
+                node["expected"] = bool(t.get("expected_failures"))
+                for f in t.get("expected_failures") or []:
+                    node["messages"].append({"type": "test expected failure", "title": "Expected failure: %s" % (f.get("message") or ""),
+                                             "file": f.get("file"), "line": f.get("line")})
+                for f in t.get("failures") or []:
+                    node["messages"].append({"type": "test failure", "title": f.get("message") or "",
+                                             "file": f.get("file"), "line": f.get("line")})
+                if m.group(3) == "skipped":
+                    node["skipped"] = True
+                    msg = t.get("skip_message")
+                    node["messages"].append({"type": "test skipped",
+                                             "title": "Test skipped - %s" % msg if msg else "Test skipped"})
+            i += 1
+            continue
+        i += 1
+    for n in stack:   # the process ended inside a suite (crash, timeout)
+        n.pop("_t", None)
+        n.pop("tail", None)
+    return roots
+
+
+POLARITY = {-1: "prefers smaller", 0: "unspecified", 1: "prefers larger"}   # XCTPerformanceMetricPolarity
+
+
+def performance_metric(m):
+    """ActionTestPerformanceMetricSummary of one metric of a performance test (x86sim test's "metrics": XCTest's
+    measure {} values, libsimshim's)"""
+    def num(x):
+        return D(x) if x is not None else None
+    return O("ActionTestPerformanceMetricSummary", displayName=S(m.get("name")), unitOfMeasurement=S(m.get("units")),
+             measurements=[D(v) for v in m.get("values") or []], identifier=S(m.get("id")),
+             baselineName=S(m.get("baselineName") or ""), baselineAverage=num(m.get("baselineAverage") or 0.0),
+             maxPercentRegression=num(m.get("maxPercentRegression")),
+             maxPercentRelativeStandardDeviation=num(m.get("maxPercentRelativeStandardDeviation")),
+             # Xcode 27.2 keeps the relative standard deviation's limit as maxStandardDeviation too (10.0, not 0.1)
+             maxRegression=num(m.get("maxRegression")), maxStandardDeviation=num(m.get("maxPercentRelativeStandardDeviation")),
+             polarity=S(POLARITY.get(m.get("polarity"), "unspecified")))
+
+
+def merge_objects(objs):
+    """ResultMetrics / ResultIssueSummaries of several runs as one: counts added, issue lists joined"""
+    out = O(objs[0].t, **dict(objs[0].f))
+    for o in objs[1:]:
+        for k, v in o.f.items():
+            cur = out.f.get(k)
+            if isinstance(v, V) and v.t == "Int" and isinstance(cur, V):
+                out.f[k] = I(int(cur.v) + int(v.v))
+            elif isinstance(v, list):
+                out.f[k] = list(cur or []) + v
+            elif cur is None:
+                out.f[k] = v
+    return out
+
+
+def write_many(summaries, bundle_path, products_root=None):
+    """One .xcresult of several runs of the same tests on different devices (xcodebuild test with several
+    -destination: an action per device, as Xcode 27.2 writes it); summaries: x86sim test's results.json of each"""
+    if os.path.lexists(bundle_path):
+        shutil.rmtree(bundle_path) if os.path.isdir(bundle_path) and not os.path.islink(bundle_path) else os.unlink(bundle_path)
+    tmp = bundle_path.rstrip("/") + ".tmp-%d" % os.getpid()
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    try:
+        ws = []
+        for s in summaries:
+            w = Writer(s, tmp, products_root, os.path.abspath(bundle_path.rstrip("/")))
+            w.write()
+            ws.append(w)
+        st = ws[0].st
+        root = st.obj(O("ActionsInvocationRecord", metadataRef=Ref(ws[0].parts["meta"], "ActionsInvocationMetadata"),
+                        metrics=merge_objects([w.parts["metrics"] for w in ws]),
+                        issues=merge_objects([w.parts["issues"] for w in ws]),
+                        actions=[w.parts["action"] for w in ws]))
+        info = {"dateCreated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0),
+                "directoryImportMode": "concurrent", "externalLocations": [], "rootId": {"hash": root},
+                "storage": {"backend": "fileBacked2", "compression": "standard"}, "version": {"major": 3, "minor": 60}}
+        with open(os.path.join(tmp, "Info.plist"), "wb") as f:
+            plistlib.dump(info, f)
+        os.rename(tmp, bundle_path)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return root
 
 
 def write(summary, bundle_path, products_root=None):
@@ -1014,7 +1563,7 @@ def write(summary, bundle_path, products_root=None):
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
     try:
-        root = Writer(summary, tmp, products_root).write()
+        root = Writer(summary, tmp, products_root, os.path.abspath(bundle_path.rstrip("/"))).write()
         info = {"dateCreated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0),
                 "directoryImportMode": "concurrent", "externalLocations": [], "rootId": {"hash": root},
                 "storage": {"backend": "fileBacked2", "compression": "standard"}, "version": {"major": 3, "minor": 60}}
@@ -1036,16 +1585,22 @@ def main(argv):
             i += 2
             continue
         if argv[i] in ("-h", "--help"):
-            print("usage: xcresult.py results.json OUT.xcresult [--products DIR]")
+            print("usage: xcresult.py results.json [results.json ...] OUT.xcresult [--products DIR]")
             return 0
         args.append(argv[i])
         i += 1
-    if len(args) != 2:
-        print("usage: xcresult.py results.json OUT.xcresult [--products DIR]", file=sys.stderr)
+    if len(args) < 2:
+        print("usage: xcresult.py results.json [results.json ...] OUT.xcresult [--products DIR]", file=sys.stderr)
         return 2
-    with open(args[0]) as f:
-        summary = json.load(f)
-    write(summary, args[1], products)
+    summaries = []
+    for p in args[:-1]:
+        with open(p) as f:
+            summaries.append(json.load(f))
+    if len(summaries) > 1:   # runs on several devices: an action each
+        write_many(summaries, args[-1], products)
+    else:
+        write(summaries[0], args[-1], products)
+    args = [args[0], args[-1]]
     print(args[1])
     return 0
 
