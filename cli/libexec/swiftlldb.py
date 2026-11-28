@@ -34,7 +34,7 @@ PBS = {
     "3.14": ("20261026", "3.14.10", "4d3c16c59ed0802a3d1d34d8bce504b15ceeaff39d62dadecc6a9fa803412aed"),
 }
 PBS_URL = "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/cpython-{ver}%2B{tag}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
-STAMP_VERSION = 1
+STAMP_VERSION = 2   # 2: python_path past loader warnings, swift lib paths without a Darwin resource dir
 SIM_SDKS = {"ios": "iPhoneSimulator", "tvos": "AppleTVSimulator", "watchos": "WatchSimulator", "xros": "XRSimulator"}
 
 
@@ -193,9 +193,14 @@ def install_python(ver, say):
     try:
         tgz = os.path.join(tmp, "python.tar.gz")
         say("== swift lldb: download Python %s (python-build-standalone %s, %s)" % (full, tag, url))
-        # curl uses the OS trust store (urllib's default CA paths are empty on NixOS and minimal containers)
-        if subprocess.run(["curl", "-fL", "--retry", "3", "--progress-bar", "-o", tgz, url]).returncode:
-            raise RuntimeError("Python download failed (curl)")
+        sys.stdout.flush()   # say may be a buffered print: keep it ahead of curl's own error output
+        # curl uses the OS trust store (urllib's default CA paths are empty on NixOS and minimal containers). Quiet:
+        # its \r progress bar is one never-ending line to the launcher. Timeouts: a stalled download must not hang
+        # the first `x86sim debug`, which sets this up.
+        r = subprocess.run(["curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--retry", "3",
+                            "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60", "-o", tgz, url])
+        if r.returncode:
+            raise RuntimeError("Python download failed (curl exit %d)" % r.returncode)
         h = hashlib.sha256()
         with open(tgz, "rb") as f:
             for b in iter(lambda: f.read(1 << 20), b""):
