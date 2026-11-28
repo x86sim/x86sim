@@ -655,6 +655,7 @@ class Writer:
     def __init__(self, summary, bundle, products_root, final=None):
         self.s = summary
         self.final = final or bundle   # where the bundle ends up (Xcode names its staging diagnostics by it)
+        self.multi_config = len({t.get("configuration") for t in summary.get("targets") or []}) > 1
         self.st = Store(bundle)
         info = xctestrun_info(summary, products_root)
         self.project = summary.get("project") or info.get("project") or guess_project(summary.get("targets") or [])
@@ -755,10 +756,15 @@ class Writer:
         ident = t["identifier"] if swift else "%s/%s" % (cls, name)
         symbol = ".".join(list(t.get("suite") or []) + [name]) if swift else "%s.%s" % (cls, name)
         url = self.url(target["name"], *ident.split("/")) if swift else self.url(target["name"], cls, t["name"])
+        query = []
+        if target.get("configuration") and self.multi_config:   # Xcode: a test plan's configuration, ?config=<name>
+            query.append("config=" + url_part(target["configuration"]))
         if arg:
-            url += "?args=" + arg["id"]
+            query.append("args=" + arg["id"])
         if run:
-            url += "?i=%d" % run["iteration"]
+            query.append("i=%d" % run["iteration"])
+        if query:
+            url += "?" + "&".join(query)
         key = ident + ("?" + arg["id"] if arg else "") + ("?i=%d" % run["iteration"] if run else "")
         status = {"passed": "Success", "failed": "Failure", "skipped": "Skipped",
                   "expected_failure": "Expected Failure"}.get(t.get("result"), "Failure")
@@ -789,7 +795,7 @@ class Writer:
             if a.get("from") == "issue" and t.get("failures"):
                 issue_atts.append(att)   # the failure's own (its screenshot), shown with the failure
                 continue
-            acts.append((when, self.activity(a, att, when, start, (target["name"], key, i))))
+            acts.append((when, self.activity(a, att, when, start, (target["name"], target.get("configuration"), key, i))))
         if tree:
             for n, o in zip(tree, self.activity_tree(tree, placed, start, start + dur, lifetime)):
                 acts.append((n.get("start") or start, o))
@@ -808,12 +814,12 @@ class Writer:
                      sourceCodeContext=O("SourceCodeContext", location=loc, callStack=stack),
                      timestamp=T(start + dur), isTopLevelFailure=B(top), expression=expression(f.get("expression")))
         expected = [O("ActionTestExpectedFailure", failureReason=S(f.get("reason") or None),
-                      failureSummary=failure(f, uid("expected-issue", target["name"], key, i), [], False),
-                      isTopLevelFailure=B(True), uuid=S(uid("expected", target["name"], key, i)))
+                      failureSummary=failure(f, uid("expected-issue", target["name"], target.get("configuration"), key, i), [], False),
+                      isTopLevelFailure=B(True), uuid=S(uid("expected", target["name"], target.get("configuration"), key, i)))
                     for i, f in enumerate(t.get("expected_failures") or [])]
         for i, f in enumerate(t.get("failures") or []):
             msg = f.get("message") or ""
-            fails.append(failure(f, uid("failure", target["name"], key, i), issue_atts if i == 0 else [], True))
+            fails.append(failure(f, uid("failure", target["name"], target.get("configuration"), key, i), issue_atts if i == 0 else [], True))
             doc = None
             if f.get("file"):
                 ln = max(0, int(f.get("line") or 1) - 1)
@@ -912,7 +918,7 @@ class Writer:
         for i, a in enumerate(target.get("attachments") or []):
             r = self.attachment(a, start, end, "keepAlways")
             if r:
-                bundle.f["activitySummaries"].append(self.activity(a, r[0], r[1], start, (target["name"], "_run", i)))
+                bundle.f["activitySummaries"].append(self.activity(a, r[0], r[1], start, (target["name"], target.get("configuration"), "_run", i)))
         # Xcode: a target without XCTest tests has an empty "All tests"
         top = self.group(target["name"], "All tests", "All tests",
                          [bundle] if groups or bundle.f["activitySummaries"] or not swift_tests else [], total)
@@ -1150,9 +1156,10 @@ class Writer:
     def diag_dirs(self, target):
         """Xcode's diagnostics folders of a test target: <T>-<UUID>-Configuration-Test Scheme Action-Iteration-1 /
         <T>-<UUID>"""
-        u1 = uid("diag-config", self.s.get("out"), target["name"])
-        u2 = uid("diag-run", self.s.get("out"), target["name"])
-        return ("%s-%s-Configuration-%s-Iteration-1" % (target["name"], u1, RUN_NAME), "%s-%s" % (target["name"], u2))
+        u1 = uid("diag-config", self.s.get("out"), target["name"], target.get("configuration"))
+        u2 = uid("diag-run", self.s.get("out"), target["name"], target.get("configuration"))
+        return ("%s-%s-Configuration-%s-Iteration-1" % (target["name"], u1, target.get("configuration") or RUN_NAME),
+                "%s-%s" % (target["name"], u2))
 
     def diagnostics(self):
         """Diagnostics, laid out as Xcode does (diag_dirs()): the test process's output
@@ -1178,10 +1185,11 @@ class Writer:
     def write(self):
         s, di = self.s, self.di
         targets = s.get("targets") or []
-        clock, testables, logs = self.t0, [], []
+        clock, logs = self.t0, []
+        runs = {}   # a test plan's configurations: one run summary each, in the order they ran
         for t in targets:
             at = max(float(t["started"]), self.t0) if t.get("started") else clock   # its real start (x86sim test's)
-            testables.append(self.testable(t, at))
+            runs.setdefault(t.get("configuration") or RUN_NAME, []).append(self.testable(t, at))
             logs.append(self.log_section(t, at))
             clock = at + float(t.get("duration") or 0)
         launches, covlog = self.launch_actions(targets), self.coverage_log(s.get("coverage"))
@@ -1191,7 +1199,7 @@ class Writer:
             logs.insert(0, launches)
         end = self.t0 + float(s.get("duration") or (clock - self.t0))
         tests_ref = self.st.obj(O("ActionTestPlanRunSummaries", summaries=[
-            O("ActionTestPlanRunSummary", name=S(RUN_NAME), testableSummaries=testables)]))
+            O("ActionTestPlanRunSummary", name=S(n), testableSummaries=ts) for n, ts in (runs.items() or [(RUN_NAME, [])])]))
         failed = s.get("result") != "passed"
         log_ref = self.st.obj(O("ActivityLogSection", domainType=S("com.apple.dt.unit.cocoaUnitTest"),
                                 title=S("Test %s" % self.scheme), startTime=T(self.t0), duration=D(end - self.t0),

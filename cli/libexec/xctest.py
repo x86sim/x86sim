@@ -58,6 +58,9 @@ Options:
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
   --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
                           result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
+  --only-test-configuration NAME, --skip-test-configuration NAME
+                          a test plan's configurations to run / leave out (an .xctestrun of a test plan holds
+                          one set of targets per configuration; each runs)
   --test-iterations N     run each test N times (xcodebuild -test-iterations; with the two below, their maximum)
   --retry-tests-on-failure
                           run a failed test again, up to 3 times (or --test-iterations): it passes when a run passes
@@ -277,14 +280,16 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         if scheme.get("project") else None,
         "baselineFileRelativePath": None, "baselineFileURL": None,
         "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"),
-        "defaultTestExecutionTimeAllowance": Num(opts.get("default_allowance") or 600),
+        "defaultTestExecutionTimeAllowance":
+            Num(opts.get("default_allowance") or t.get("DefaultTestExecutionTimeAllowance") or 600),
         "deferSymbolicationToHarness": False, "disablePerformanceMetrics": False, "emitOSLogs": False, "formatVersion": 2,
         "gatherLocalizableStringsData": False,
         "hangDetectionPolicy": Obj(["XCTHangDetectionPolicy", "NSObject"],
                                    {"detectionEnabled": False, "durationThreshold": 1.0, "severity": 0}),
         "inProcessParallelizationEnabled": True, "initializeForMultiDevice": False, "initializeForUITesting": ui,
         "leaksCheckingMode": 0,
-        "maximumTestExecutionTimeAllowance": Num(opts["max_allowance"]) if opts.get("max_allowance") else None,
+        "maximumTestExecutionTimeAllowance": Num(opts.get("max_allowance") or t["MaximumTestExecutionTimeAllowance"])
+        if opts.get("max_allowance") or t.get("MaximumTestExecutionTimeAllowance") else None,
         "multiDevicePlatformVersionMap": None,
         "multiDeviceRemoteRunnerPlatformMap": None, "multiDeviceRequirementsFilePath": None,
         "performanceTestConfiguration": None, "preferredScreenCaptureFormat": 1, "productModuleName": module,
@@ -309,7 +314,7 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "testApplicationUserOverrides": None,
         "testBundleRelativePath": rel_bundle(bundle), "testBundleURL": URL(bundle.rstrip("/") + "/"),
         "testExecutionOrdering": 0, "testIdentifiersToRun": to_run, "testInstructionsSet": None,
-        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": bool(opts.get("timeouts")),
+        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": bool(opts["timeouts"] if opts.get("timeouts") is not None else t.get("TestTimeoutsEnabled")),
         "testsDrivenByIDE": False, "testsMustRunOnMainThread": ui, "traceCollectionEnabled_v2": None,
         "treatMissingBaselinesAsFailures": False,
         "userAttachmentLifetime": LIFETIMES.get(t.get("UserAttachmentLifetime"), 1),
@@ -1764,8 +1769,12 @@ class Runner:
 
     def run_target(self, t):
         name, kind = t["_name"], kind_of(t)
+        # a test plan's configuration: the target runs once per configuration; its files are named for both
+        stem = "%s-%s" % (name, re.sub(r"[^A-Za-z0-9._-]+", "_", t["_config"])) if t.get("_multi") else name
         sel = selection(t, self.a["only"], self.a["skip"], self.names)
         res = {"name": name, "kind": kind, "result": "failed", "tests": [], "duration": 0.0, "log": None}
+        if t.get("_config"):
+            res["configuration"] = t["_config"]   # the test plan configuration it ran in
         if sel is None:
             return None
         only, skip = sel
@@ -1776,24 +1785,24 @@ class Runner:
         rec = None
         if kind == "ui" and t.get("PreferredScreenCaptureFormat", "screenRecording") == "screenRecording" \
                 and not self.a["no_recording"] and shutil.which("ffmpeg"):
-            rec = Recorder(self.dev, os.path.join(self.work, "rec-" + name))
+            rec = Recorder(self.dev, os.path.join(self.work, "rec-" + stem))
             parser.on_start, parser.on_end = rec.start, rec.stop
-        log = os.path.join(self.out, name + ".log")
+        log = os.path.join(self.out, stem + ".log")
         res["log"] = log
         # issue #50: libsimshim (simshim_xct.c) writes every XCTest attachment of the test process here
-        att = os.path.join(self.out, "attachments", ".raw-" + name)
+        att = os.path.join(self.out, "attachments", ".raw-" + stem)
         shutil.rmtree(att, ignore_errors=True)
         os.makedirs(att, exist_ok=True)
-        outf = os.path.join(self.work, name + ".out")
+        outf = os.path.join(self.work, stem + ".out")
         open(outf, "w").close()
-        swt_events = os.path.join(self.work, name + ".swt.jsonl")   # Swift Testing's events (simswt)
+        swt_events = os.path.join(self.work, stem + ".swt.jsonl")   # Swift Testing's events (simswt)
         open(swt_events, "w").close()
-        swt_issues = os.path.join(self.work, name + ".issues.jsonl")   # call stacks of unlocated XCTest issues (simswt)
+        swt_issues = os.path.join(self.work, stem + ".issues.jsonl")   # call stacks of unlocated XCTest issues (simswt)
         open(swt_issues, "w").close()
         module = t.get("ProductModuleName") or name
         interop = INTEROP_MODES.get(str(t.get("TestInteropMode", "complete")).lower(), 2)
         products = self.root
-        self.say("\n=== %s (%s tests)" % (name, kind))
+        self.say("\n=== %s (%s tests%s)" % (name, kind, ", %s" % t["_config"] if t.get("_multi") else ""))
         try:
             if kind == "logic":
                 bundle = self.subst(t["TestBundlePath"])
@@ -1805,7 +1814,7 @@ class Runner:
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
                 cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme, opts=self.a)
-                env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
+                env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
                 # the test process, as Xcode's action log names it (runnable: what Xcode launched)
                 res["process"], res["runnable"] = "xctest", undv(agent)
@@ -1856,7 +1865,7 @@ class Runner:
                 else:
                     cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t,
                                         scheme=self.scheme, opts=self.a)
-                env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
+                env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
                 args = list(t.get("CommandLineArguments", []))
@@ -1883,8 +1892,8 @@ class Runner:
                 time.sleep(1)
             with open(log, "wb") as raw:
                 how = self.wait(parser, outf, self.a["timeout"], alive, raw)
-            parser.swift_testing(swt_events, os.path.join(self.out, name + ".swt.jsonl"), self.root)
-            parser.issue_stacks(swt_issues, os.path.join(self.out, name + ".issues.jsonl"), self.root)
+            parser.swift_testing(swt_events, os.path.join(self.out, stem + ".swt.jsonl"), self.root)
+            parser.issue_stacks(swt_issues, os.path.join(self.out, stem + ".issues.jsonl"), self.root)
             if how == "timeout":
                 parser.finish("timed out after %d s" % self.a["timeout"])
             elif how == "exited":
@@ -1917,14 +1926,14 @@ class Runner:
         if os.path.isdir(appout):   # the UI tests' app, each launch (libsimshim): in launch order
             outs = sorted((os.path.join(appout, f) for f in os.listdir(appout)), key=os.path.getmtime)
             if outs:
-                res["app_output"] = {"bid": tbid, "path": os.path.join(self.out, name + ".app.log")}
+                res["app_output"] = {"bid": tbid, "path": os.path.join(self.out, stem + ".app.log")}
                 with open(res["app_output"]["path"], "w") as f:
                     for o in outs:
                         with open(o, errors="replace") as g:
                             f.write(g.read())
             shutil.rmtree(appout, ignore_errors=True)
         sess = os.path.join(att, "session.log")
-        res["session_log"] = os.path.join(self.out, name + ".session.log")
+        res["session_log"] = os.path.join(self.out, stem + ".session.log")
         now = time.time()
         with open(res["session_log"], "w") as f:   # Xcode's first lines: the session, the device
             f.write("%s.%03d x86sim[%d:%d] Beginning test session %s at %s on target %s (%s)\n" % (
@@ -2070,6 +2079,16 @@ class Runner:
             targets = [t for t in targets if t["_name"] in self.a["targets"]]
             if not targets:
                 die("no test target named %s" % ", ".join(self.a["targets"]))
+        # a test plan's configurations (-only-test-configuration / -skip-test-configuration)
+        if self.a.get("only_config"):
+            targets = [t for t in targets if t.get("_config") in self.a["only_config"]]
+        if self.a.get("skip_config"):
+            targets = [t for t in targets if t.get("_config") not in self.a["skip_config"]]
+        if not targets:
+            die("no test configuration left to run")
+        multi = len({t.get("_config") for t in targets}) > 1
+        for t in targets:
+            t["_multi"] = multi
         self.names = {n for t in targets for n in [t["_name"]] + list(t.get("_modules", ()))}
         self.scheme = self.scheme_info(targets)
         t0 = time.time()
@@ -2293,16 +2312,18 @@ def xcodebuild_report(s, action, p):
     p("Test session results, code coverage, and logs:")
     p("\t%s" % (s.get("result_bundle") or s["out"]))
     p("")
-    fails = [t for r in s["targets"] for t in r["tests"] if t["result"] == "failed"]
-    if fails:
+    names = []   # each failing test once (a test plan runs it once per configuration)
+    for t in (t for r in s["targets"] for t in r["tests"] if t["result"] == "failed"):
+        if t.get("swift_testing"):
+            n = ".".join((t.get("suite") or [])[-1:] + [t["name"]])
+        else:
+            n = "%s.%s" % (t["class"].split(".")[-1], t["name"] if t["name"].endswith(")") else t["name"] + "()")
+        if n not in names:
+            names.append(n)
+    if names:
         p("Failing tests:")
-        for t in fails:
-            if t.get("swift_testing"):
-                suite = (t.get("suite") or [])[-1:]
-                p("\t%s" % ".".join(suite + [t["name"]]))
-            else:
-                n = t["name"] if t["name"].endswith(")") else t["name"] + "()"
-                p("\t%s.%s" % (t["class"].split(".")[-1], n))
+        for n in names:
+            p("\t%s" % n)
         p("")
     p("** TEST %s%s **" % ("EXECUTE " if action == "test-without-building" else "",
                            "SUCCEEDED" if s["result"] == "passed" else "FAILED"))
@@ -2375,7 +2396,7 @@ def parse(argv):
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
          "built": False, "build_log": None, "xcodebuild": None,
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
-         "max_allowance": None}
+         "max_allowance": None, "only_config": [], "skip_config": []}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2411,6 +2432,10 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--only-test-configuration":
+            a["only_config"].append(val())
+        elif k == "--skip-test-configuration":
+            a["skip_config"].append(val())
         elif k == "--test-iterations":
             a["iterations"] = int(val())
         elif k == "--retry-tests-on-failure":

@@ -55,6 +55,13 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
+- **Test plans**: a scheme's test plan (`.xctestplan`) gives an `.xctestrun` with one set of targets per
+  configuration (Swift Build writes it in `build-for-testing`: each configuration's environment, arguments,
+  language and region, skipped and selected tests, time limits); `x86sim test` runs every configuration in turn
+  (`--only-test-configuration` / `--skip-test-configuration`, the stand-in's `-only-test-configuration` /
+  `-skip-test-configuration`) and the result bundle has a run per configuration, its tests' URLs with Xcode's
+  `?config=<name>` (equal to Xcode's for a two-configuration plan of XCTestDemo). Only the scheme's default plan is
+  built: `-testPlan` picks no other.
 - **Repetitions and time limits** (`--test-iterations N`, `--retry-tests-on-failure`, `--run-tests-until-failure`,
   `--test-timeouts-enabled YES`, `--default-test-execution-time-allowance S`, `--maximum-test-execution-time-allowance
   S`; the `xcodebuild` stand-in passes its options of those names): XCTest repeats the tests in the test process as
