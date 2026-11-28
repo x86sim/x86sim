@@ -72,7 +72,8 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   The `xcodebuild` stand-in writes the bundle at `-resultBundlePath` and `x86sim test`'s own output next to it
   (`<bundle>.x86sim/`). Its `test` also puts the build in it, as Xcode does: the build log (`xcresulttool get log
   --type build`: one section per Swift Build task that ran, with Xcode's titles, commands and times, read from the
-  build's `XCBuildData`), its errors and warnings (`get build-results`), and when the build fails, a bundle with the
+  build's `XCBuildData`), its errors and warnings (`get build-results`, with the issue types of the compilers'
+  serialized diagnostics: Swift's diagnostic groups, clang's categories), and when the build fails, a bundle with the
   errors and "Testing cancelled because the build failed." (`x86sim test --build-log`).
 - **Where the bundles come from**, built on Linux:
   - a Swift package: `x86sim dev test --xctest` / `x86sim test --spm`, which build its tests (`swift build
@@ -117,11 +118,12 @@ What still differs from Xcode 27.2 on a Mac, measured with the fixtures above (n
   run has instead of screenshots.
 - **Result bundles**: tests, attachments and targets carry the times they really ran (`started` in `results.json`,
   from `libsimshim` and `libsimswt`). The build action is "not requested", as in `test-without-building`. After the
-  `xcodebuild` stand-in's `test`, the build log has Swift Build's planned tasks but not the Swift driver's per-file
-  jobs ("Compiling X.swift", "Compiling Clang module ...") nor Xcode's own steps ("Create build request"), so a
-  diagnostic sits on the log instead of its compile step; an issue's type is the compiler's ("Swift Compiler
-  Warning"), not its diagnostic group ("NoUsage"), which sweetpad does not pass on. The run destination's host record describes the Linux machine (the environment reads `XCTestDemo`, not
-  `XCTestDemo · Built with macOS …`). How often a UI test's "Waiting …" activity re-checks before it times out
+  `xcodebuild` stand-in's `test`, the build log has Xcode's sections for the same build (XCTestDemo: 256 against
+  Xcode's 251; Swift Build on Linux has no "Build stat cache" step and runs two more each of "Generate DER
+  entitlements", "Process product packaging" and "Write Entitlements-Simulated.plist"); the Swift driver's per-file
+  jobs and explicit modules are timed from the files they wrote, and their compiler output is only the diagnostics
+  (Xcode keeps the whole output, the failed frontend command with it). The run destination's host record describes
+  the Linux machine (the environment reads `XCTestDemo`, not `XCTestDemo · Built with macOS …`). How often a UI test's "Waiting …" activity re-checks before it times out
   depends on timing, so a slow host can record a different count than Apple's.
 - **Selection**: a bare `-only-testing Class` (no target) selects that class in every target; Xcode refuses it.
 - **Swift packages**: SwiftPM builds one `<Package>PackageTests` bundle; `x86sim test --spm` relinks it once per test
