@@ -1,0 +1,4 @@
+the translator made no pipeline of vsRealityPbr, fsMeshSoftShadowReceiver: unsupported: Lowering(Arith); needs NotImplemented at function fsMeshSoftShadowReceiver, block 2, instruction 88
+colors [0:RGBA16Float+blend] depth 260 stencil 260 samples 4
+vert: vsRealityPbr
+frag: fsMeshSoftShadowReceiver

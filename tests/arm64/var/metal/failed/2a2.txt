@@ -1,0 +1,4 @@
+the translator made no pipeline of vsBreakthroughSceneResolveSDFPass, fsBreakthroughMeshClearImageBlock: unsupported: Imageblocks; needs NotImplemented at metadata of entry fsBreakthroughMeshClearImageBlock
+colors [0:R16Float] depth 0 stencil 0 samples 1
+vert: vsBreakthroughSceneResolveSDFPass
+frag: fsBreakthroughMeshClearImageBlock

@@ -477,7 +477,9 @@ def load_xctestrun(path, products):
             for t in c.get("TestTargets", []):
                 t = dict(t)
                 t.setdefault("_name", t.get("BlueprintName") or t.get("ProductModuleName"))
-                t["_config"] = c.get("Name")
+                # a test plan's configuration (an .xctestrun without one names its only configuration as it likes:
+                # Swift Build's "Debug"; Xcode's run is then "Test Scheme Action")
+                t["_config"] = c.get("Name") if d.get("TestPlan") else None
                 targets.append(t)
     else:
         targets = [dict(v, _name=k) for k, v in d.items() if not k.startswith("__") and isinstance(v, dict)]
@@ -1970,6 +1972,7 @@ class Runner:
             lines = []
         self.activities(raw, tests)
         self.start_times(raw, tests)
+        self.metrics(raw, tests)
         used = set()
         for ln in lines:
             try:
@@ -2012,6 +2015,29 @@ class Runner:
         except OSError:
             pass
         return loose
+
+    @staticmethod
+    def metrics(raw, tests):
+        """A performance test's metrics (libsimshim's metrics.jsonl: XCTest's measure {} / measure(metrics:)): its
+        "metrics", each {"id", "name", "units", "values", "baselineName", "baselineAverage", the max regressions and
+        deviations, "polarity"} as XCTest reported them; a repeated test's, on the run they were measured in"""
+        try:
+            lines = open(os.path.join(raw, "metrics.jsonl")).read().splitlines()
+        except OSError:
+            return
+        for ln in lines:
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            m = re.match(r"-\[(\S+) (\S+)\]$", e.pop("test", None) or "")
+            if not m:
+                continue
+            cls, tn = m.group(1).split(".")[-1], m.group(2)
+            t = next((x for x in tests if not x.get("swift_testing") and x["name"] == tn
+                      and x["class"].split(".")[-1] == cls), None)
+            if t is not None:
+                t.setdefault("metrics", []).append(e)
 
     @staticmethod
     def start_times(raw, tests):

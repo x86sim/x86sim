@@ -192,6 +192,7 @@ def mac_tool(remote, name, run):
     check(rc == 0 and out.strip().startswith("{"), "%s: get log --type action" % name)
     res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
     res["diagnostics"] = diagnostics_files(sh, b)
+    res["metrics"] = perf_metrics(sh, b)
     # the build: its status and issues; its log when the run built the products (the xcodebuild stand-in's test)
     rc, out, err = get("get build-results --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get build-results" % name)
@@ -276,6 +277,7 @@ def apple(remote_bundle, coverage=False):
     rc, out, err = ssh("xcrun xcresulttool get log --type action --path %s" % shlex.quote(remote_bundle))
     res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
     res["diagnostics"] = diagnostics_files(ssh, shlex.quote(remote_bundle))
+    res["metrics"] = perf_metrics(ssh, shlex.quote(remote_bundle))
     urls = []
     nodes(res["tests"], urls=urls)
     b = shlex.quote(remote_bundle)
@@ -404,6 +406,24 @@ def details_tree(d):
     return top
 
 
+def perf_metrics(sh, bundle):
+    """`xcresulttool get test-results metrics`: per performance test its metrics without their measured values (the
+    number of measurements kept)"""
+    rc, out, _ = sh("xcrun xcresulttool get test-results metrics --path %s" % bundle)
+    try:
+        tests = json.loads(out) if rc == 0 else []
+    except ValueError:
+        return None
+    res = {}
+    for t in tests:
+        res[t["testIdentifier"]] = sorted((m.get("identifier"), m.get("displayName"), m.get("unitOfMeasurement"),
+                                           m.get("polarity"), m.get("baselineName"), m.get("baselineAverage"),
+                                           m.get("maxPercentRegression"), m.get("maxPercentRelativeStandardDeviation"),
+                                           m.get("maxRegression"), m.get("maxStandardDeviation"), len(m.get("measurements") or []))
+                                          for r in t.get("testRuns") or [] for m in r.get("metrics") or [])
+    return res
+
+
 def diagnostics_files(sh, bundle):
     """The test targets' files of `xcresulttool export diagnostics`, their UUIDs and times left out
     (<Target>-*-Configuration-Test Scheme Action-Iteration-1/<Target>-*/StandardOutputAndStandardError*.txt,
@@ -480,6 +500,13 @@ def compare(ours, theirs, name):
     for u in ddiff:
         print("     %s\n       ours:  %s\n       Apple: %s" % (u, json.dumps(details_tree(do[u])["runs"], ensure_ascii=False),
                                                          json.dumps(details_tree(da[u])["runs"], ensure_ascii=False)))
+    mo, ma = ours.get("metrics") or {}, theirs.get("metrics") or {}
+    if ma:
+        check(mo == ma, "%s vs Apple: performance metrics of %d tests (ids, names, units, polarity, baselines, limits, "
+              "number of measurements)" % (name, len(ma)))
+        for k in sorted(set(mo) | set(ma)):
+            if mo.get(k) != ma.get(k):
+                print("     %s\n       ours:  %s\n       Apple: %s" % (k, mo.get(k), ma.get(k)))
     fo, fa = ours.get("diagnostics") or [], theirs.get("diagnostics") or []
     if fa:
         check(fo == fa, "%s vs Apple: diagnostics of the test targets (%d files: outputs, the app's, session logs)"

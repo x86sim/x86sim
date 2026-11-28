@@ -845,14 +845,15 @@ class Writer:
                 for a in (arg or {}).get("args") or []]
         reps = O("ActionTestRepetitionPolicySummary", iteration=I(run["iteration"]), totalIterations=I((rep or {}).get("total")),
                  repetitionMode=S((rep or {}).get("mode"))) if run else None
+        perf = [performance_metric(m) for m in (t.get("metrics") or []) if not run] if not swift else []
         summ = O("ActionTestSummary", name=S(name), identifier=S(ident), identifierURL=S(url),
-                 testStatus=S(status), duration=D(dur), performanceMetrics=[], failureSummaries=fails, expectedFailures=expected,
+                 testStatus=S(status), duration=D(dur), performanceMetrics=perf, failureSummaries=fails, expectedFailures=expected,
                  skipNoticeSummary=skip, activitySummaries=acts, arguments=args, warningSummaries=[], documentation=[],
                  trackedIssues=[], tags=[], repetitionPolicySummary=reps)
         ref = self.st.obj(summ)
         return O("ActionTestMetadata", name=S(name), identifier=S(ident), identifierURL=S(url),
                  testStatus=S(status), duration=D(dur), summaryRef=Ref(ref, "ActionTestSummary"),
-                 performanceMetricsCount=I(0), failureSummariesCount=I(len(fails)), activitySummariesCount=I(len(acts))), dur
+                 performanceMetricsCount=I(len(perf)), failureSummariesCount=I(len(fails)), activitySummariesCount=I(len(acts))), dur
 
     def group(self, target, ident, name, subtests, dur):
         return O("ActionTestSummaryGroup", name=S(name), identifier=S(ident), identifierURL=S(self.url(target, *ident.split("/"))),
@@ -1479,6 +1480,24 @@ def log_tree(text, tests, start):
         n.pop("_t", None)
         n.pop("tail", None)
     return roots
+
+
+POLARITY = {-1: "prefers smaller", 0: "unspecified", 1: "prefers larger"}   # XCTPerformanceMetricPolarity
+
+
+def performance_metric(m):
+    """ActionTestPerformanceMetricSummary of one metric of a performance test (x86sim test's "metrics": XCTest's
+    measure {} values, libsimshim's)"""
+    def num(x):
+        return D(x) if x is not None else None
+    return O("ActionTestPerformanceMetricSummary", displayName=S(m.get("name")), unitOfMeasurement=S(m.get("units")),
+             measurements=[D(v) for v in m.get("values") or []], identifier=S(m.get("id")),
+             baselineName=S(m.get("baselineName") or ""), baselineAverage=num(m.get("baselineAverage") or 0.0),
+             maxPercentRegression=num(m.get("maxPercentRegression")),
+             maxPercentRelativeStandardDeviation=num(m.get("maxPercentRelativeStandardDeviation")),
+             # Xcode 27.2 keeps the relative standard deviation's limit as maxStandardDeviation too (10.0, not 0.1)
+             maxRegression=num(m.get("maxRegression")), maxStandardDeviation=num(m.get("maxPercentRelativeStandardDeviation")),
+             polarity=S(POLARITY.get(m.get("polarity"), "unspecified")))
 
 
 def write(summary, bundle_path, products_root=None):

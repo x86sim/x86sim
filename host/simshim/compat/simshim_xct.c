@@ -9,7 +9,8 @@
 // XCTest finishes is one line of <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null
 // at the top), "title", "type", "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's
 // ActionTestActivitySummary), which on a Mac goes to the IDE session. Each test it performs is one line of
-// <dir>/tests.jsonl (when it ran); XCTest's debug log goes to <dir>/session.log.
+// <dir>/tests.jsonl (when it ran); XCTest's debug log goes to <dir>/session.log, performance metrics to
+// <dir>/metrics.jsonl.
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
@@ -34,6 +35,7 @@ static unsigned xct_seq;
 // one's address is soon another's (a list of addresses dropped the failure triage's "App UI hierarchy" text)
 static char xct_seen_key;
 static IMP xct_invoke_orig, xct_act_orig, xct_issue_orig, xct_case_orig, xct_perform_orig, xct_finish_orig, xct_debug_orig;
+static IMP xct_measure_orig;
 
 static const char* xct_cstr(id s)
 {
@@ -264,6 +266,58 @@ static void xct_set_as_logger(void)
 	set(o);
 }
 
+static void xct_json_num(FILE* f, id n)
+{
+	if (!n || !class_respondsToSelector(object_getClass(n), sel_registerName("doubleValue")))
+		fputs("null", f);
+	else
+		fprintf(f, "%.17g", ((double (*)(id, SEL)) objc_msgSend)(n, sel_registerName("doubleValue")));
+}
+
+// -[XCTestObservationCenter _testCase:didMeasureValues:forPerformanceMetricID:...:polarity:]: a performance test's
+// metric (measure {}, measure(metrics:)). On a Mac it goes to the IDE session; here one JSON line of
+// <dir>/metrics.jsonl: {"test", "id", "name", "units", "values", "baselineName", "baselineAverage",
+// "maxPercentRegression", "maxPercentRelativeStandardDeviation", "maxRegression", "maxStandardDeviation", "polarity"}.
+typedef void (*xct_measure_fn)(id, SEL, id, id, id, id, id, id, id, id, id, id, id, id, long);
+static void xct_measure(id self, SEL sel, id test, id values, id mid, id name, id units, id bname, id bavg, id mpr,
+                        id mprsd, id mreg, id msd, id ctx, long polarity)
+{
+	((xct_measure_fn) xct_measure_orig)(self, sel, test, values, mid, name, units, bname, bavg, mpr, mprsd, mreg, msd,
+	                                    ctx, polarity);
+	if (!xct_dir)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/metrics.jsonl", xct_dir);
+	pthread_mutex_lock(&xct_mu);
+	FILE* f = fopen(p, "a");
+	if (f) {
+		// the test case's run (XCTestCaseRun): its test is the XCTestCase
+		id tc = test && class_respondsToSelector(object_getClass(test), sel_registerName("test"))
+		        ? ((id (*)(id, SEL)) objc_msgSend)(test, sel_registerName("test")) : test;
+		const char* tn = tc && class_respondsToSelector(object_getClass(tc), sel_registerName("name"))
+		                 ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(tc, sel_registerName("name"))) : NULL;
+		fputs("{\"test\":", f); xct_json_str(f, tn);
+		fputs(",\"id\":", f); xct_json_str(f, xct_cstr(mid));
+		fputs(",\"name\":", f); xct_json_str(f, xct_cstr(name));
+		fputs(",\"units\":", f); xct_json_str(f, xct_cstr(units));
+		fputs(",\"values\":[", f);
+		long n = values ? ((long (*)(id, SEL)) objc_msgSend)(values, sel_registerName("count")) : 0;
+		for (long i = 0; i < n; i++) {
+			if (i) fputc(',', f);
+			xct_json_num(f, ((id (*)(id, SEL, long)) objc_msgSend)(values, sel_registerName("objectAtIndex:"), i));
+		}
+		fputs("],\"baselineName\":", f); if (bname) xct_json_str(f, xct_cstr(bname)); else fputs("null", f);
+		fputs(",\"baselineAverage\":", f); xct_json_num(f, bavg);
+		fputs(",\"maxPercentRegression\":", f); xct_json_num(f, mpr);
+		fputs(",\"maxPercentRelativeStandardDeviation\":", f); xct_json_num(f, mprsd);
+		fputs(",\"maxRegression\":", f); xct_json_num(f, mreg);
+		fputs(",\"maxStandardDeviation\":", f); xct_json_num(f, msd);
+		fprintf(f, ",\"polarity\":%ld}\n", polarity);
+		fclose(f);
+	}
+	pthread_mutex_unlock(&xct_mu);
+}
+
 static void xct_act_add(id self, SEL sel, id att) { xct_write(att, "activity", self); ((void (*)(id, SEL, id)) xct_act_orig)(self, sel, att); }
 static void xct_issue_add(id self, SEL sel, id att) { xct_write(att, "issue", NULL); ((void (*)(id, SEL, id)) xct_issue_orig)(self, sel, att); }
 static void xct_case_add(id self, SEL sel, id att) { xct_write(att, "test", NULL); ((void (*)(id, SEL, id)) xct_case_orig)(self, sel, att); }
@@ -285,6 +339,11 @@ static void xct_added(const struct mach_header* mh, intptr_t slide)
 	if (!xct_finish_orig) xct_finish_orig = xct_hook("XCActivityRecord", "setFinish:", (IMP) xct_finish);
 	if (!xct_debug_orig) xct_debug_orig = xct_hook("XCTDefaultDebugLogHandler", "logDebugMessage:", (IMP) xct_debug);
 	xct_set_as_logger();
+	if (!xct_measure_orig)
+		xct_measure_orig = xct_hook("XCTestObservationCenter", "_testCase:didMeasureValues:forPerformanceMetricID:name:"
+		                            "unitsOfMeasurement:baselineName:baselineAverage:maxPercentRegression:"
+		                            "maxPercentRelativeStandardDeviation:maxRegression:maxStandardDeviation:"
+		                            "sourceCodeContext:polarity:", (IMP) xct_measure);
 	static bool said;
 	if (!said && xct_invoke_orig) {
 		said = true;

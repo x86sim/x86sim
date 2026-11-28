@@ -695,5 +695,19 @@ Test Case '-[L.LogicTests testSort]' passed (0.001 seconds).
         self.assertEqual(X.repetition({"iterations": 2}), (3, 2, "FixedIterations"))
 
 
+class PerformanceMetrics(unittest.TestCase):
+    def test_row20_metric_summary(self):
+        # libsimshim's record of XCTest's measure {} -> Xcode 27.2's ActionTestPerformanceMetricSummary
+        import xcresult
+        m = xcresult.performance_metric({"id": "com.apple.XCTPerformanceMetric_WallClockTime", "name": "Time",
+                                         "units": "seconds", "values": [0.005, 0.002], "baselineName": None,
+                                         "baselineAverage": None, "maxPercentRegression": 10,
+                                         "maxPercentRelativeStandardDeviation": 10, "maxRegression": 0.1,
+                                         "maxStandardDeviation": 0.1, "polarity": -1})
+        f = {k: (v.v if hasattr(v, "v") else v) for k, v in m.f.items()}
+        self.assertEqual((f["polarity"], f["maxStandardDeviation"], f["maxRegression"], f["baselineAverage"],
+                          f["baselineName"], len(f["measurements"])), ("prefers smaller", "10.0", "0.1", "0.0", "", 2))
+
+
 if __name__ == "__main__":
     unittest.main()

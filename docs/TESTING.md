@@ -55,6 +55,11 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
+- **Performance tests** (`measure {}`, `measure(metrics:)`): each metric XCTest measured (`libsimshim` takes them
+  where Xcode's IDE session would) is kept with the test (`metrics` in `results.json`: identifier, name, units,
+  values, baseline, limits, polarity) and in a result bundle as Xcode keeps it (`xcresulttool get test-results
+  metrics`, `hasPerformanceMetrics`; equal to Xcode 27.2's but for the measured values). Baselines are not kept:
+  Xcode stores them in the project's `xcbaselines`, which a run here does not write.
 - **Test plans**: a scheme's test plan (`.xctestplan`) gives an `.xctestrun` with one set of targets per
   configuration (Swift Build writes it in `build-for-testing`: each configuration's environment, arguments,
   language and region, skipped and selected tests, time limits); `x86sim test` runs every configuration in turn
