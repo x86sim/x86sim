@@ -58,8 +58,12 @@ Options:
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
   --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
                           result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
-  --also-on PHONE         run the same tests on another device after this one (repeatable: xcodebuild test with
-                          several -destination); one result bundle with an action per device
+  --also-on PHONE         run the same tests on another device too (repeatable: xcodebuild test with several
+                          -destination); the devices test at the same time, as xcodebuild's destinations; one result
+                          bundle with an action per device
+  --serial-destinations   one device after another (xcodebuild -disable-concurrent-destination-testing)
+  --max-concurrent-destinations N
+                          at most N at once (default 4: xcodebuild -maximum-concurrent-test-simulator-destinations)
   --only-test-configuration NAME, --skip-test-configuration NAME
                           a test plan's configurations to run / leave out (an .xctestrun of a test plan holds
                           one set of targets per configuration; each runs)
@@ -2508,7 +2512,8 @@ def parse(argv):
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
          "built": False, "build_log": None, "xcodebuild": None,
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
-         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False}
+         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False,
+         "multi_child": False, "serial_destinations": False, "max_destinations": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2544,6 +2549,12 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--multi-child":
+            a["multi_child"] = True
+        elif k == "--serial-destinations":
+            a["serial_destinations"] = True
+        elif k == "--max-concurrent-destinations":
+            a["max_destinations"] = int(val())
         elif k == "--also-on":
             a["more_phones"].append(val())
         elif k == "--only-test-configuration":
@@ -2612,8 +2623,10 @@ def main(argv):
     if not (a["xctestrun"] or a["app"] or a["bundles"] or a["runner"] or a["spm"]):
         die("nothing to run\n" + USAGE)
     phones = [None] + list(a["more_phones"])   # None: the device x86sim picked (X86SIM_DEVICE)
-    a["multi"] = len(phones) > 1
+    a["multi"] = len(phones) > 1 or a["multi_child"]
     first_dev = os.environ.get("X86SIM_DEVICE")
+    if len(phones) > 1 and not a["serial_destinations"]:
+        return concurrent_destinations(argv, a, phones)
     results = []
     for ph in phones:
         if ph is not None:
@@ -2652,7 +2665,9 @@ def main(argv):
     elif a["json"]:
         with open(a["json"], "w") as f:
             json.dump(s if len(summaries) == 1 else summaries, f, indent=1)
-    if len(summaries) == 1:
+    if a["multi_child"]:
+        pass   # one of several destinations: the parent reports
+    elif len(summaries) == 1:
         report(s, a["quiet"], a["xcodebuild"])
     else:
         merged = dict(s, targets=[t for x in summaries for t in x["targets"]], _multi=True,
@@ -2665,6 +2680,92 @@ def main(argv):
     if not all(x["targets"] for x in summaries):
         return 2
     return 0 if all(x["result"] == "passed" for x in summaries) else 1
+
+
+def strip_args(argv, drop_with_value, drop=()):
+    """argv without the options named (and their values)"""
+    out, it = [], iter(argv)
+    for x in it:
+        k = x.split("=", 1)[0]
+        if k in drop_with_value:
+            if "=" not in x:
+                next(it, None)
+            continue
+        if k in drop:
+            continue
+        out.append(x)
+    return out
+
+
+def concurrent_destinations(argv, a, phones):
+    """Several devices at once, as xcodebuild tests its destinations (at most --max-concurrent-destinations, Xcode's
+    -maximum-concurrent-test-simulator-destinations, default 4): an x86sim test of each device in its own process
+    (--multi-child: xcodebuild's per-destination lines, its results.json), then one result bundle and the closing
+    lines over all of them"""
+    import concurrent.futures
+    devs = [os.environ.get("X86SIM_DEVICE")] + [device_path(p) for p in phones[1:]]
+    for p, d in zip(phones, devs):
+        if not d:
+            die("no device %s" % p)
+    work = tempfile.mkdtemp(prefix="dests-", dir=x86config.get("X86SIM_SCRATCH"))
+    base = strip_args(argv, ("--also-on", "--result-bundle", "--json", "--junit", "--out", "--max-concurrent-destinations"))
+    limit = a["max_destinations"] or 4
+    if a["xcodebuild"] and not a["quiet"]:
+        print("Testing on multiple destinations concurrently. Note that it is not possible to run tests in parallel on "
+              "individual destinations in this mode. Pass -disable-concurrent-destination-testing instead to allow tests "
+              "to run in parallel on each destination, but have the destinations run serially.Maximum concurrent test "
+              "device destinations is unlimited. (Adjust this with -maximum-concurrent-test-device-destinations.) "
+              "Maximum concurrent test simulator destinations is set to %d. (Adjust this with "
+              "-maximum-concurrent-test-simulator-destinations.)" % limit, flush=True)
+
+    def one(i):
+        js = os.path.join(work, "%d.json" % i)
+        cmd = [sys.executable, os.path.abspath(__file__)] + base + ["--multi-child", "--json", js]
+        if a["out"]:
+            cmd += ["--out", a["out"] if i == 0 else "%s-%s" % (a["out"].rstrip("/"), phones[i])]
+        subprocess.run(cmd, env=dict(os.environ, X86SIM_DEVICE=devs[i]))
+        try:
+            with open(js) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=limit) as ex:
+        summaries = list(ex.map(one, range(len(devs))))
+    shutil.rmtree(work, ignore_errors=True)
+    missing = [p or "the first device" for p, x in zip(phones, summaries) if x is None]
+    summaries = [x for x in summaries if x is not None]
+    if missing:
+        print("x86sim test: no results from %s" % ", ".join(missing), file=sys.stderr)
+    if not summaries:
+        return 2
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            products = None
+            if a["xctestrun"]:
+                products = load_xctestrun(a["xctestrun"], a["products"])[0]
+            xcresult.write_many(summaries, a["result_bundle"], products) if len(summaries) > 1 else \
+                xcresult.write(summaries[0], a["result_bundle"], products)
+            for x in summaries:
+                x["result_bundle"] = os.path.abspath(a["result_bundle"])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    if a["json"]:
+        if a["json"] == "-":
+            json.dump(summaries, sys.stdout, indent=1)
+            print()
+        else:
+            with open(a["json"], "w") as f:
+                json.dump(summaries, f, indent=1)
+    ok = all(x["result"] == "passed" for x in summaries) and not missing
+    merged = dict(summaries[0], targets=[t for x in summaries for t in x["targets"]], _multi=True,
+                  result="passed" if ok else "failed")
+    if a["xcodebuild"]:
+        report(merged, a["quiet"], a["xcodebuild"])
+    else:
+        for x in summaries:
+            report(x, a["quiet"])
+    return 0 if ok else 1
 
 
 def device_path(name):

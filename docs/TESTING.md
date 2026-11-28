@@ -56,11 +56,13 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
-- **Several devices** (`--also-on PHONE`, repeatable; the stand-in's several `-destination`s): the tests run on
-  each device in turn, and one result bundle holds an action per device, as Xcode's (`xcresulttool` shows each test
-  per device). The stand-in prints what `xcodebuild` prints then ("Test suite 'X' started on 'phone - xctest
-  (pid)'", "Test case 'C.t()' passed on '...'", "Testing passed / failed on 'phone'"). Xcode tests the
-  destinations at the same time; here they run one after another.
+- **Several devices** (`--also-on PHONE`, repeatable; the stand-in's several `-destination`s): the devices test at
+  the same time, as Xcode's destinations (at most 4, `--max-concurrent-destinations` /
+  `-maximum-concurrent-test-simulator-destinations`; `--serial-destinations` / `-disable-concurrent-destination-testing`
+  one after another), and one result bundle holds an action per device, as Xcode's (`xcresulttool` shows each test
+  per device; XCTestDemo's on an iPhone and an iPad: Apple's counts). The stand-in prints what `xcodebuild` prints
+  then ("Testing on multiple destinations concurrently. ...", "Test suite 'X' started on 'phone - xctest (pid)'",
+  "Test case 'C.t()' passed on '...'", "Testing passed / failed on 'phone'").
 - **Performance tests** (`measure {}`, `measure(metrics:)`): each metric XCTest measured (`libsimshim` takes them
   where Xcode's IDE session would) is kept with the test (`metrics` in `results.json`: identifier, name, units,
   values, baseline, limits, polarity) and in a result bundle as Xcode keeps it (`xcresulttool get test-results
@@ -71,8 +73,8 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   language and region, skipped and selected tests, time limits); `x86sim test` runs every configuration in turn
   (`--only-test-configuration` / `--skip-test-configuration`, the stand-in's `-only-test-configuration` /
   `-skip-test-configuration`) and the result bundle has a run per configuration, its tests' URLs with Xcode's
-  `?config=<name>` (equal to Xcode's for a two-configuration plan of XCTestDemo). Only the scheme's default plan is
-  built: `-testPlan` picks no other.
+  `?config=<name>` (equal to Xcode's for a two-configuration plan of XCTestDemo). `-testPlan NAME` builds that plan
+  instead of the scheme's default.
 - **Repetitions and time limits** (`--test-iterations N`, `--retry-tests-on-failure`, `--run-tests-until-failure`,
   `--test-timeouts-enabled YES`, `--default-test-execution-time-allowance S`, `--maximum-test-execution-time-allowance
   S`; the `xcodebuild` stand-in passes its options of those names): XCTest repeats the tests in the test process as
