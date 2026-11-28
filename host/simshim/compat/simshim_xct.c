@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char* xct_dir;
@@ -358,8 +359,42 @@ __attribute__((constructor)) static void tm_init(void)
 	_dyld_register_func_for_add_image(tm_added);
 }
 
+// The app a UI test launches (XCUIApplication: XCTestConfiguration.targetApplicationEnvironment, from x86sim test):
+// X86SIM_XCTEST_APP_OUTPUT=<dir> sends its standard output and error to <dir>/<pid>.txt, as Xcode keeps them
+// (Diagnostics/.../StandardOutputAndStandardError-<bundle id>.txt), with Xcode's first line.
+static void xct_app_output(void)
+{
+	const char* d = getenv("X86SIM_XCTEST_APP_OUTPUT");
+	if (!d || !*d)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/%d.txt", d, getpid());
+	int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0)
+		return;
+	time_t now = time(NULL);
+	struct tm tm;
+	gmtime_r(&now, &tm);
+	char when[64];
+	strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S +0000", &tm);
+	id bundle = ((id (*)(Class, SEL)) objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+	const char* bid = bundle ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(bundle, sel_registerName("bundleIdentifier"))) : NULL;
+	dprintf(fd, "Standard output and standard error from %s with process ID %d beginning at %s\n\n",
+	        bid ? bid : getprogname(), getpid(), when);
+	dup2(fd, 1);
+	dup2(fd, 2);
+	close(fd);
+	unsetenv("X86SIM_XCTEST_APP_OUTPUT");   // not for the processes it starts
+	// its os_log on stderr too, as an app Xcode launches has it: x86sim test passes OS_ACTIVITY_DT_MODE in its
+	// environment (libtrace may have read it before this constructor)
+	const char* mode = getenv("OS_ACTIVITY_MODE");
+	if (mode && !strcmp(mode, "disable"))   // a launchd job's default here (mksimdevice.py): it also silences DT mode
+		unsetenv("OS_ACTIVITY_MODE");
+}
+
 __attribute__((constructor)) static void xct_init(void)
 {
+	xct_app_output();
 	const char* d = getenv("X86SIM_XCTEST_ATTACHMENTS");
 	if (!d || !*d)
 		return;

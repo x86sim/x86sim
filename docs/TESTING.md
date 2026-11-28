@@ -70,9 +70,11 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   Xcode names in the UI test runner, and the action log Xcode writes (`get log --type action`: each test process,
   its suites and test cases, XCTest's and Swift Testing's, with their own output, summary, failures, skips, known
   issues and Xcode's "N tests total, P passed, ..." lines; each install and launch with its environment; the
-  coverage report's steps) with XCTest's debug log as the session log in the
-  diagnostics (`export diagnostics`; XCTest would print it among the test output without Xcode's IDE session). `tests/xcresult/check.py` compares bundles with Apple's on the comparison Mac:
-  test-details, the legacy issue summaries, frames and activities.
+  coverage report's steps), and the diagnostics in Xcode's layout (`export diagnostics`: per test target its
+  output, the UI tests' app's output, `StandardOutputAndStandardError-<bundle id>.txt`, and XCTest's debug log as
+  the session log, which XCTest would otherwise print among the test output). `tests/xcresult/check.py` compares
+  bundles with Apple's on the comparison Mac: test-details, the legacy issue summaries, frames, activities, the
+  action log and the diagnostics' files.
   The `xcodebuild` stand-in writes the bundle at `-resultBundlePath` and `x86sim test`'s own output next to it
   (`<bundle>.x86sim/`). Its `test` also puts the build in it, as Xcode does: the build log (`xcresulttool get log
   --type build`: one section per Swift Build task that ran, with Xcode's titles, commands and times, read from the

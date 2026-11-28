@@ -977,7 +977,7 @@ class Writer:
         subs = [self.log_node(n, res) for n in suites]
         if target.get("session_log"):
             # Xcode: where it writes the session log (in the bundle's staging area, while it runs)
-            sess = "%s/Staging/1_Test/Diagnostics/%s/%s" % (self.final, target["name"], self.session_name(target))
+            sess = "%s/Staging/1_Test/Diagnostics/%s/%s" % (self.final, "/".join(self.diag_dirs(target)), self.session_name(target))
             subs.insert(0, O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection"),
                              title=S("Writing diagnostic log for test runner launch."), startTime=T(start),
                              duration=D(0.0), result=S("succeeded"), subsections=[], attachments=[],
@@ -1138,19 +1138,32 @@ class Writer:
         tag = base64.b64encode(hashlib.sha256(("%s %s" % (target["name"], when)).encode()).digest()).decode()
         return "Session-%s-%s-%s.log" % (target["name"], when, re.sub(r"[^A-Za-z0-9]", "x", tag)[:6])
 
+    def diag_dirs(self, target):
+        """Xcode's diagnostics folders of a test target: <T>-<UUID>-Configuration-Test Scheme Action-Iteration-1 /
+        <T>-<UUID>"""
+        u1 = uid("diag-config", self.s.get("out"), target["name"])
+        u2 = uid("diag-run", self.s.get("out"), target["name"])
+        return ("%s-%s-Configuration-%s-Iteration-1" % (target["name"], u1, RUN_NAME), "%s-%s" % (target["name"], u2))
+
     def diagnostics(self):
-        """Diagnostics/<Target>/: the test process's output (StandardOutputAndStandardError.txt) and XCTest's debug log
-        (the session log: x86sim test's <Target>.session.log, libsimshim's), as Xcode keeps them"""
+        """Diagnostics, laid out as Xcode does (diag_dirs()): the test process's output
+        (StandardOutputAndStandardError.txt), the UI tests' app's (StandardOutputAndStandardError-<bundle id>.txt,
+        libsimshim's) and XCTest's debug log (the session log: x86sim test's <Target>.session.log, libsimshim's)"""
         ents = []
         for t in self.s.get("targets") or []:
             files = []
-            if t.get("log") and os.path.isfile(t["log"]):
-                files.append(("StandardOutputAndStandardError.txt", ("file", self.st.put(self.output(t).encode()))))
             if t.get("session_log") and os.path.isfile(t["session_log"]):
                 oid, _ = self.st.file(t["session_log"])
                 files.append((self.session_name(t), ("file", oid)))
+            if t.get("log") and os.path.isfile(t["log"]):
+                files.append(("StandardOutputAndStandardError.txt", ("file", self.st.put(self.output(t).encode()))))
+            ao = t.get("app_output") or {}
+            if ao.get("path") and os.path.isfile(ao["path"]):
+                files.append(("StandardOutputAndStandardError-%s.txt" % ao.get("bid"),
+                              ("file", self.st.put(self.output({"log": ao["path"]}).encode()))))
             if files:
-                ents.append((t["name"], ("dir", self.st.directory(files))))
+                outer, inner = self.diag_dirs(t)
+                ents.append((outer, ("dir", self.st.directory([(inner, ("dir", self.st.directory(files)))]))))
         return self.st.directory(ents) if ents else None
 
     def write(self):

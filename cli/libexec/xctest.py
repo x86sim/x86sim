@@ -1761,6 +1761,11 @@ class Runner:
                 if kind == "ui":
                     tenv = {k: self.subst(str(v), host) for k, v in t.get("UITargetAppEnvironmentVariables", {}).items()}
                     tenv.update(self.profile_env(t["_name"] + "-app"))
+                    # libsimshim: the app's standard output and error (Xcode's StandardOutputAndStandardError-<bid>.txt)
+                    appout = os.path.join(att, "app-output")
+                    os.makedirs(appout, exist_ok=True)
+                    tenv["X86SIM_XCTEST_APP_OUTPUT"] = dv(appout)
+                    tenv.setdefault("OS_ACTIVITY_DT_MODE", "YES")   # its os_log with it (libtrace reads it at its start)
                     for k in [k for k in tenv if k.startswith("DYLD_")]:
                         tenv["X86SIM_A64_GENV_" + k] = tenv[k]
                     cfg = configuration(bundle, module, target_path=tpath, target_bid=tbid,
@@ -1826,6 +1831,16 @@ class Runner:
             res["error"] = "the device did not answer (%s)" % e
         res["tests"] = parser.tests
         # XCTest's debug log (libsimshim: Xcode's session log, which XCTest otherwise prints among the output)
+        appout = os.path.join(att, "app-output")
+        if os.path.isdir(appout):   # the UI tests' app, each launch (libsimshim): in launch order
+            outs = sorted((os.path.join(appout, f) for f in os.listdir(appout)), key=os.path.getmtime)
+            if outs:
+                res["app_output"] = {"bid": tbid, "path": os.path.join(self.out, name + ".app.log")}
+                with open(res["app_output"]["path"], "w") as f:
+                    for o in outs:
+                        with open(o, errors="replace") as g:
+                            f.write(g.read())
+            shutil.rmtree(appout, ignore_errors=True)
         sess = os.path.join(att, "session.log")
         res["session_log"] = os.path.join(self.out, name + ".session.log")
         now = time.time()

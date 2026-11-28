@@ -191,6 +191,7 @@ def mac_tool(remote, name, run):
     rc, out, err = get("get log --type action --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get log --type action" % name)
     res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
+    res["diagnostics"] = diagnostics_files(sh, b)
     # the build: its status and issues; its log when the run built the products (the xcodebuild stand-in's test)
     rc, out, err = get("get build-results --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get build-results" % name)
@@ -274,6 +275,7 @@ def apple(remote_bundle, coverage=False):
     res["legacy_issues"] = legacy_issues(remote_bundle)
     rc, out, err = ssh("xcrun xcresulttool get log --type action --path %s" % shlex.quote(remote_bundle))
     res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
+    res["diagnostics"] = diagnostics_files(ssh, shlex.quote(remote_bundle))
     urls = []
     nodes(res["tests"], urls=urls)
     b = shlex.quote(remote_bundle)
@@ -402,6 +404,22 @@ def details_tree(d):
     return top
 
 
+def diagnostics_files(sh, bundle):
+    """The test targets' files of `xcresulttool export diagnostics`, their UUIDs and times left out
+    (<Target>-*-Configuration-Test Scheme Action-Iteration-1/<Target>-*/StandardOutputAndStandardError*.txt,
+    Session-<Target>-*.log)"""
+    rc, out, _ = sh("d=$(mktemp -d) && xcrun xcresulttool export diagnostics --path %s --output-path $d >/dev/null && "
+                    "(cd $d && find . -type f); rm -rf $d" % bundle)
+    uu = r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
+    names = set()
+    for ln in out.splitlines():
+        parts = ln.split("/")
+        if len(parts) == 5 and "-Configuration-" in parts[2]:
+            f = re.sub(r"-\d{4}-\d\d-\d\d_\d{6}-\w{6}\.log$", ".log", parts[4])
+            names.add("/".join([re.sub(uu, "*", parts[2]), re.sub(uu, "*", parts[3]), f]))
+    return sorted(names)
+
+
 def action_tree(log):
     """The test targets' part of an action log as Xcode nests it (`get log --type action`): per section its path of
     titles (a process's pid left out), result, testDetails keys, tests-passed line, skipped, its failure / skip
@@ -462,6 +480,12 @@ def compare(ours, theirs, name):
     for u in ddiff:
         print("     %s\n       ours:  %s\n       Apple: %s" % (u, json.dumps(details_tree(do[u])["runs"], ensure_ascii=False),
                                                          json.dumps(details_tree(da[u])["runs"], ensure_ascii=False)))
+    fo, fa = ours.get("diagnostics") or [], theirs.get("diagnostics") or []
+    if fa:
+        check(fo == fa, "%s vs Apple: diagnostics of the test targets (%d files: outputs, the app's, session logs)"
+              % (name, len(fa)))
+        if fo != fa:
+            print("     only ours:  %s\n     only Apple: %s" % (sorted(set(fo) - set(fa)), sorted(set(fa) - set(fo))))
     ao, aa = action_tree(ours.get("action_log")), action_tree(theirs.get("action_log"))
     if aa:
         adiff = sorted(k for k in set(ao) | set(aa) if ao.get(k) != aa.get(k))
