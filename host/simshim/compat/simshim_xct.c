@@ -156,8 +156,35 @@ static double xct_now(void)
 
 // every test XCTest performs is one line of <dir>/tests.jsonl: {"test", "start", "finish"} (Unix times), when it
 // really ran (Xcode's ActionTestSummary times come from the IDE session's test-started / -finished messages)
+// X86SIM_XCTEST_ENUMERATE=<file>: list the bundle's test classes instead of running tests (x86sim test's parallel
+// testing splits a target by class, as Xcode's workers do): at the first test XCTest performs, every XCTestCase
+// subclass outside XCTest with tests is one line of <file> ("<class name> <test count>"), and the process exits.
+static void xct_enumerate(const char* path)
+{
+	FILE* f = fopen(path, "w");
+	if (!f)
+		_exit(1);
+	Class tc = objc_getClass("XCTestCase");
+	id all = tc ? ((id (*)(Class, SEL)) objc_msgSend)(tc, sel_registerName("allSubclassesOutsideXCTest")) : nil;
+	if (all && class_respondsToSelector(object_getClass(all), sel_registerName("allObjects")))
+		all = ((id (*)(id, SEL)) objc_msgSend)(all, sel_registerName("allObjects"));   // a set
+	long n = all ? ((long (*)(id, SEL)) objc_msgSend)(all, sel_registerName("count")) : 0;
+	for (long i = 0; i < n; i++) {
+		id c = ((id (*)(id, SEL, long)) objc_msgSend)(all, sel_registerName("objectAtIndex:"), i);
+		id suite = ((id (*)(id, SEL)) objc_msgSend)(c, sel_registerName("defaultTestSuite"));
+		long count = suite ? ((long (*)(id, SEL)) objc_msgSend)(suite, sel_registerName("testCaseCount")) : 0;
+		if (count > 0)
+			fprintf(f, "%s %ld\n", class_getName((Class) c), count);
+	}
+	fclose(f);
+	_exit(0);
+}
+
 static void xct_perform(id self, SEL sel, id run)
 {
+	const char* en = getenv("X86SIM_XCTEST_ENUMERATE");
+	if (en && *en)
+		xct_enumerate(en);
 	const char* nm = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(self, sel_registerName("name")));
 	char name[512];
 	snprintf(name, sizeof name, "%s", nm ? nm : "");

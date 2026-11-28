@@ -61,6 +61,10 @@ Options:
   --also-on PHONE         run the same tests on another device too (repeatable: xcodebuild test with several
                           -destination); the devices test at the same time, as xcodebuild's destinations; one result
                           bundle with an action per device
+  --parallel-testing[=YES|NO], --parallel-workers N
+                          split each target's classes over N worker processes (xcodebuild -parallel-testing-enabled,
+                          -parallel-testing-worker-count; default 2; the .xctestrun's ParallelizationEnabled turns it
+                          on): logic tests run at once, tests hosted in an app one worker after another
   --serial-destinations   one device after another (xcodebuild -disable-concurrent-destination-testing)
   --max-concurrent-destinations N
                           at most N at once (default 4: xcodebuild -maximum-concurrent-test-simulator-destinations)
@@ -1734,7 +1738,7 @@ class Runner:
             f.write(data)
         return dv(p)
 
-    def wait(self, parser, outf, timeout, alive, raw):
+    def wait(self, parser, outf, timeout, alive, raw, label=None):
         """Follow the test process's output file until XCTest's top suite ended and the process is gone, the process
         ended, or the time is up. Returns 'done', 'exited' or 'timeout'."""
         pos, buf = 0, b""
@@ -1758,10 +1762,10 @@ class Runner:
                 for l in lines:
                     s = l.decode(errors="replace").rstrip("\r")
                     own = parser.line(s)
-                    if self.a.get("multi") and xb:
+                    if (self.a.get("multi") or self.a.get("_parallel_now")) and xb:
                         # xcodebuild on several destinations: a line per suite start and test end, on the device
                         if not quiet and own:
-                            out = multi_line(s, "%s - %s (%s)" % (self.phone, self.cur_process, self.cur_pid))
+                            out = multi_line(s, label or self.phone)
                             if out:
                                 print(out, flush=True)
                     elif not quiet and (verbose or own or (xb and not X86SIM_LINE.match(s))):
@@ -1784,6 +1788,69 @@ class Runner:
                 return "timeout"
             time.sleep(0.2)
 
+    def run_parallel(self, t):
+        """Parallel testing (xcodebuild -parallel-testing-enabled YES, the .xctestrun's ParallelizationEnabled): the
+        target's XCTest classes split over workers, each a test process of its own running its classes, as Xcode's
+        workers do. Here the workers share the device: logic tests (the xctest tool) run at once, up to
+        --parallel-workers; tests hosted in an app (one copy per device) run one worker after another. The classes
+        come from the bundle itself (libsimshim: X86SIM_XCTEST_ENUMERATE). The result is the target's, as one run."""
+        sel = selection(t, self.a["only"], self.a["skip"], self.names)
+        if sel is None:
+            return None
+        if sel[0]:   # a selection of tests: they run as chosen, in one process
+            return self.run_target(t)
+        listing = os.path.join(self.work, "%s.classes" % re.sub(r"[^A-Za-z0-9._-]+", "_", t["_name"]))
+        quiet = self.a["quiet"]
+        self.a["quiet"] = True
+        try:
+            r0 = self.run_target(t, worker=0, extra_env={"X86SIM_XCTEST_ENUMERATE": dv(listing)})
+        finally:
+            self.a["quiet"] = quiet
+        for f in (r0 or {}).get("log"), (r0 or {}).get("session_log"):   # the listing run's files: not a run
+            if f and os.path.exists(f):
+                os.unlink(f)
+        try:
+            rows = [ln.split() for ln in open(listing).read().splitlines() if ln.strip()]
+        except OSError:
+            rows = []
+        classes = [(r[0].split(".")[-1], int(r[1])) for r in rows if len(r) == 2]
+        n = max(1, int(self.a.get("parallel_workers") or 2))
+        if len(classes) < 2 or n < 2:
+            return self.run_target(t)
+        groups = [[] for _ in range(min(n, len(classes)))]
+        load = [0] * len(groups)
+        for c, k in sorted(classes, key=lambda x: -x[1]):   # the biggest classes first, each to the lightest worker
+            i = load.index(min(load))
+            groups[i].append(c)
+            load[i] += k
+        t0 = time.monotonic()
+        self.a["_parallel_now"] = True
+        try:
+            if kind_of(t) == "logic":
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as ex:
+                    runs = list(ex.map(lambda ig: self.run_target(t, worker=ig[0] + 1, classes=ig[1]), enumerate(groups)))
+            else:
+                runs = [self.run_target(t, worker=i + 1, classes=g) for i, g in enumerate(groups)]
+        finally:
+            self.a["_parallel_now"] = False
+        runs = [r for r in runs if r]
+        if not runs:
+            return None
+        res = dict(runs[0])
+        res["tests"] = sorted([x for r in runs for x in r["tests"]], key=lambda x: (x.get("started") or 0))
+        res["attachments"] = [x for r in runs for x in r.get("attachments") or []]
+        res["logs"] = [r["log"] for r in runs]
+        res["workers"] = [{"classes": g, "pid": r.get("pid"), "log": r["log"]} for g, r in zip(groups, runs)]
+        res["duration"] = round(time.monotonic() - t0, 3)
+        errs = [r["error"] for r in runs if r.get("error")]
+        if errs:
+            res["error"] = "; ".join(errs)
+        else:
+            res.pop("error", None)
+        res["result"] = "failed" if errs or any(x["result"] == "failed" for x in res["tests"]) else "passed"
+        return res
+
     def run_repeated(self, t):
         """A target with -test-repetition-relaunch-enabled: each repetition a new test process, as Xcode relaunches it
         ("Running tests repeatedly N times."): fixed iterations run it N times, until-failure until a test fails,
@@ -1791,6 +1858,8 @@ class Runner:
         repetitions ("iterations", Xcode's verdicts; none when it ran once)."""
         rep = repetition(self.a)
         if not (rep and self.a.get("relaunch")):
+            if self.a.get("parallel") or (self.a.get("parallel") is None and t.get("ParallelizationEnabled")):
+                return self.run_parallel(t)
             return self.run_target(t)
         mode, total, name = rep
         if selection(t, self.a["only"], self.a["skip"], self.names) is None:
@@ -1841,13 +1910,19 @@ class Runner:
         res["result"] = "failed" if any(x["result"] == "failed" for x in res["tests"]) or "error" in res else "passed"
         return res
 
-    def run_target(self, t, iteration=None):
+    def run_target(self, t, iteration=None, worker=None, classes=None, extra_env=None):
+        """One run of a target's test process. worker / classes: a parallel worker's number and its test classes
+        (run_parallel()); extra_env: more of the test process's environment"""
         name, kind = t["_name"], kind_of(t)
         # a test plan's configuration: the target runs once per configuration; its files are named for both
         stem = "%s-%s" % (name, re.sub(r"[^A-Za-z0-9._-]+", "_", t["_config"])) if t.get("_multi") else name
         if iteration and iteration > 1:   # a relaunched repetition's files
             stem += "-run%d" % iteration
+        if worker is not None:
+            stem += "-w%d" % worker
         sel = selection(t, self.a["only"], self.a["skip"], self.names)
+        if sel is not None and classes is not None:
+            sel = (list(classes), sel[1])
         res = {"name": name, "kind": kind, "result": "failed", "tests": [], "duration": 0.0, "log": None}
         if t.get("_config"):
             res["configuration"] = t["_config"]   # the test plan configuration it ran in
@@ -1889,6 +1964,7 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
+                env.update(extra_env or {})
                 cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme, opts=self.a)
                 env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
@@ -1924,6 +2000,7 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
+                env.update(extra_env or {})
                 if kind == "ui":
                     tenv = {k: self.subst(str(v), host) for k, v in t.get("UITargetAppEnvironmentVariables", {}).items()}
                     tenv.update(self.profile_env(t["_name"] + "-app"))
@@ -1966,9 +2043,9 @@ class Runner:
                     res["launch"]["target"] = {"path": tapp, "bid": tbid, "install": list(tins) if tins else None}
                 alive = lambda: self.simctl.pidof(bid) is not None   # noqa: E731
                 time.sleep(1)
-            self.cur_process, self.cur_pid = res.get("process") or name, pid   # the console's "on '...'" (multi)
+            label = "%s - %s (%s)" % (self.phone, res.get("process") or name, pid)   # the console's "on '...'"
             with open(log, "wb") as raw:
-                how = self.wait(parser, outf, self.a["timeout"], alive, raw)
+                how = self.wait(parser, outf, self.a["timeout"], alive, raw, label)
             parser.swift_testing(swt_events, os.path.join(self.out, stem + ".swt.jsonl"), self.root)
             parser.issue_stacks(swt_issues, os.path.join(self.out, stem + ".issues.jsonl"), self.root)
             if how == "timeout":
@@ -2513,7 +2590,8 @@ def parse(argv):
          "built": False, "build_log": None, "xcodebuild": None,
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
          "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False,
-         "multi_child": False, "serial_destinations": False, "max_destinations": None}
+         "multi_child": False, "serial_destinations": False, "max_destinations": None, "parallel": None,
+         "parallel_workers": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2549,6 +2627,10 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--parallel-testing":
+            a["parallel"] = val().upper() in ("YES", "1", "TRUE") if "=" in x else True
+        elif k == "--parallel-workers":
+            a["parallel_workers"] = int(val())
         elif k == "--multi-child":
             a["multi_child"] = True
         elif k == "--serial-destinations":

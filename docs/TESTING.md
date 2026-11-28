@@ -56,6 +56,12 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
+- **Parallel testing** (`--parallel-testing`, `--parallel-workers N`; the stand-in's `-parallel-testing-enabled YES`
+  and `-parallel-testing-worker-count N`; an `.xctestrun` target's `ParallelizationEnabled`): a target's XCTest
+  classes are split over workers (the biggest first, each to the least loaded), each a test process of its own, as
+  Xcode's workers; the classes come from the bundle itself. Xcode clones the simulator for its workers; here they
+  share the device: logic tests run at the same time, tests hosted in an app (one copy per device) one worker after
+  another. The results are the target's, as one run.
 - **Several devices** (`--also-on PHONE`, repeatable; the stand-in's several `-destination`s): the devices test at
   the same time, as Xcode's destinations (at most 4, `--max-concurrent-destinations` /
   `-maximum-concurrent-test-simulator-destinations`; `--serial-destinations` / `-disable-concurrent-destination-testing`
