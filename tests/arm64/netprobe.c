@@ -49,14 +49,18 @@ static void reuse(int round)
 	dispatch_queue_t q = dispatch_queue_create("p", NULL);
 	dispatch_semaphore_t got = dispatch_semaphore_create(0);
 	dispatch_source_t a = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, sv[0], 0, q);
-	dispatch_source_set_event_handler(a, ^{ dispatch_semaphore_signal(got); dispatch_suspend(a); });
+	__block int a_fired = 0;
+	dispatch_source_set_event_handler(a, ^{ a_fired = 1; dispatch_semaphore_signal(got); dispatch_suspend(a); });
 	dispatch_resume(a);
 	close(sv[1]); // EOF on sv[0]
 	dispatch_semaphore_wait(got, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
 	int old = sv[0];
 	close(sv[0]); // closed before the source is cancelled (as Network/dnssd do)
 	dispatch_source_cancel(a);
-	dispatch_resume(a);
+	// handlers run on q: checked there, a handler that is running has suspended its source before this reads its flag
+	// (read from here, the flag could be set and the source not yet suspended: resuming it was libdispatch's over-resume
+	// crash, a brk, whenever the event came at the wrong moment)
+	dispatch_sync(q, ^{ if (a_fired) dispatch_resume(a); });
 	int s = tcp();
 	__block int fired = 0;
 	dispatch_source_t b = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, s, 0, q);
@@ -69,7 +73,7 @@ static void reuse(int round)
 	(void) r;
 	usleep(300 * 1000);
 	dispatch_source_cancel(b);
-	if (fired) dispatch_resume(b);
+	dispatch_sync(q, ^{ if (fired) dispatch_resume(b); });
 	close(s);
 }
 

@@ -19,7 +19,7 @@ xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -O
 xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -O1 -fobjc-arc -framework Foundation -o "$O/plist.sim" "$S/plist.m"
 xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -O1 -fobjc-arc -framework Foundation -o "$O/crashsig.sim" "$S/crashsig.m"
 # probes that had no line here (built by hand from their headers' commands)
-for t in threadstack deadname forkstress sigmaskprobe; do $SIM -O1 -o "$O/$t.sim" "$S/$t.c"; done
+for t in threadstack deadname forkstress sigmaskprobe fcntlprobe; do $SIM -O1 -o "$O/$t.sim" "$S/$t.c"; done
 xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -mcpu=apple-m1 -O1 -o "$O/fp16x.sim" "$S/fp16x.c"
 for k in sim mac; do
   if [ $k = sim ]; then sdk=iphonesimulator; tgt=arm64-apple-ios17.0-simulator; else sdk=macosx; tgt=arm64-apple-macos14.0; fi
