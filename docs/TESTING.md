@@ -55,6 +55,11 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
+- **Several devices** (`--also-on PHONE`, repeatable; the stand-in's several `-destination`s): the tests run on
+  each device in turn, and one result bundle holds an action per device, as Xcode's (`xcresulttool` shows each test
+  per device). The stand-in prints what `xcodebuild` prints then ("Test suite 'X' started on 'phone - xctest
+  (pid)'", "Test case 'C.t()' passed on '...'", "Testing passed / failed on 'phone'"). Xcode tests the
+  destinations at the same time; here they run one after another.
 - **Performance tests** (`measure {}`, `measure(metrics:)`): each metric XCTest measured (`libsimshim` takes them
   where Xcode's IDE session would) is kept with the test (`metrics` in `results.json`: identifier, name, units,
   values, baseline, limits, polarity) and in a result bundle as Xcode keeps it (`xcresulttool get test-results

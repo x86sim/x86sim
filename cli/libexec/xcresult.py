@@ -1268,8 +1268,10 @@ class Writer:
                                                 sharedState=S("shared"))))
         top = metrics(errors=len(b_err) + len(a_err), warnings=len(b_warn))
         top.f["totalCoveragePercentage"] = D(pct)
+        iss = issues(self.issues, b_err + a_err, b_warn)
+        self.parts = {"action": rec, "metrics": top, "issues": iss, "meta": meta}   # for merge()
         root = self.st.obj(O("ActionsInvocationRecord", metadataRef=Ref(meta, "ActionsInvocationMetadata"),
-                             metrics=top, issues=issues(self.issues, b_err + a_err, b_warn), actions=[rec]))
+                             metrics=top, issues=iss, actions=[rec]))
         return root
 
 
@@ -1500,6 +1502,52 @@ def performance_metric(m):
              polarity=S(POLARITY.get(m.get("polarity"), "unspecified")))
 
 
+def merge_objects(objs):
+    """ResultMetrics / ResultIssueSummaries of several runs as one: counts added, issue lists joined"""
+    out = O(objs[0].t, **dict(objs[0].f))
+    for o in objs[1:]:
+        for k, v in o.f.items():
+            cur = out.f.get(k)
+            if isinstance(v, V) and v.t == "Int" and isinstance(cur, V):
+                out.f[k] = I(int(cur.v) + int(v.v))
+            elif isinstance(v, list):
+                out.f[k] = list(cur or []) + v
+            elif cur is None:
+                out.f[k] = v
+    return out
+
+
+def write_many(summaries, bundle_path, products_root=None):
+    """One .xcresult of several runs of the same tests on different devices (xcodebuild test with several
+    -destination: an action per device, as Xcode 27.2 writes it); summaries: x86sim test's results.json of each"""
+    if os.path.lexists(bundle_path):
+        shutil.rmtree(bundle_path) if os.path.isdir(bundle_path) and not os.path.islink(bundle_path) else os.unlink(bundle_path)
+    tmp = bundle_path.rstrip("/") + ".tmp-%d" % os.getpid()
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    try:
+        ws = []
+        for s in summaries:
+            w = Writer(s, tmp, products_root, os.path.abspath(bundle_path.rstrip("/")))
+            w.write()
+            ws.append(w)
+        st = ws[0].st
+        root = st.obj(O("ActionsInvocationRecord", metadataRef=Ref(ws[0].parts["meta"], "ActionsInvocationMetadata"),
+                        metrics=merge_objects([w.parts["metrics"] for w in ws]),
+                        issues=merge_objects([w.parts["issues"] for w in ws]),
+                        actions=[w.parts["action"] for w in ws]))
+        info = {"dateCreated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0),
+                "directoryImportMode": "concurrent", "externalLocations": [], "rootId": {"hash": root},
+                "storage": {"backend": "fileBacked2", "compression": "standard"}, "version": {"major": 3, "minor": 60}}
+        with open(os.path.join(tmp, "Info.plist"), "wb") as f:
+            plistlib.dump(info, f)
+        os.rename(tmp, bundle_path)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return root
+
+
 def write(summary, bundle_path, products_root=None):
     """Write `summary` (what x86sim test writes as results.json) as the .xcresult bundle `bundle_path` (replaced if it
     is there). products_root: where the run's products and .xctestrun are (the project and scheme names come from its
@@ -1537,16 +1585,22 @@ def main(argv):
             i += 2
             continue
         if argv[i] in ("-h", "--help"):
-            print("usage: xcresult.py results.json OUT.xcresult [--products DIR]")
+            print("usage: xcresult.py results.json [results.json ...] OUT.xcresult [--products DIR]")
             return 0
         args.append(argv[i])
         i += 1
-    if len(args) != 2:
-        print("usage: xcresult.py results.json OUT.xcresult [--products DIR]", file=sys.stderr)
+    if len(args) < 2:
+        print("usage: xcresult.py results.json [results.json ...] OUT.xcresult [--products DIR]", file=sys.stderr)
         return 2
-    with open(args[0]) as f:
-        summary = json.load(f)
-    write(summary, args[1], products)
+    summaries = []
+    for p in args[:-1]:
+        with open(p) as f:
+            summaries.append(json.load(f))
+    if len(summaries) > 1:   # runs on several devices: an action each
+        write_many(summaries, args[-1], products)
+    else:
+        write(summaries[0], args[-1], products)
+    args = [args[0], args[-1]]
     print(args[1])
     return 0
 

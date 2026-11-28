@@ -575,7 +575,11 @@ def main(argv):
         b = os.path.join(work, name + ".xcresult")
         # XCTestDemo's products (its .xctestrun names the project and scheme) for runs that do not name their project
         # (a Swift package's results.json does: x86sim test --spm)
-        xcresult.write(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run.get("project") else None)
+        if isinstance(run, list):   # several devices (x86sim test --also-on): an action each
+            xcresult.write_many(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run[0].get("project") else None)
+            run = dict(run[0], targets=[t for x in run for t in x["targets"]])
+        else:
+            xcresult.write(run, b, PRODUCTS if os.path.isdir(PRODUCTS) and not run.get("project") else None)
         local_check(b)
         built.append((name, b, run))
     rc, out, err = ssh("mktemp -d /tmp/x86sim-xcr.XXXXXX")

@@ -58,6 +58,8 @@ Options:
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
   --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
                           result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
+  --also-on PHONE         run the same tests on another device after this one (repeatable: xcodebuild test with
+                          several -destination); one result bundle with an action per device
   --only-test-configuration NAME, --skip-test-configuration NAME
                           a test plan's configurations to run / leave out (an .xctestrun of a test plan holds
                           one set of targets per configuration; each runs)
@@ -1749,7 +1751,13 @@ class Runner:
                 for l in lines:
                     s = l.decode(errors="replace").rstrip("\r")
                     own = parser.line(s)
-                    if not quiet and (verbose or own or (xb and not X86SIM_LINE.match(s))):
+                    if self.a.get("multi") and xb:
+                        # xcodebuild on several destinations: a line per suite start and test end, on the device
+                        if not quiet and own:
+                            out = multi_line(s, "%s - %s (%s)" % (self.phone, self.cur_process, self.cur_pid))
+                            if out:
+                                print(out, flush=True)
+                    elif not quiet and (verbose or own or (xb and not X86SIM_LINE.match(s))):
                         print(s, flush=True)
                 if parser.done and done_at is None:
                     done_at = time.monotonic()
@@ -1892,6 +1900,7 @@ class Runner:
                     res["launch"]["target"] = {"path": tapp, "bid": tbid, "install": list(tins) if tins else None}
                 alive = lambda: self.simctl.pidof(bid) is not None   # noqa: E731
                 time.sleep(1)
+            self.cur_process, self.cur_pid = res.get("process") or name, pid   # the console's "on '...'" (multi)
             with open(log, "wb") as raw:
                 how = self.wait(parser, outf, self.a["timeout"], alive, raw)
             parser.swift_testing(swt_events, os.path.join(self.out, stem + ".swt.jsonl"), self.root)
@@ -2332,6 +2341,20 @@ def junit(s):
     return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
 
 
+def multi_line(s, where):
+    """an XCTest line as xcodebuild prints it when it tests on several destinations ("Test suite 'X' started on
+    'iPhone 18 Pro - xctest (7668)'", "Test case 'C.t()' passed on '...' (0.117 seconds)"); None for the others"""
+    m = R_SUITE.match(s)
+    if m and m.group(2) == "started":
+        return "Test suite '%s' started on '%s'" % (m.group(1), where)
+    m = R_CASE_END.match(s)
+    if m:
+        name = m.group(2) if m.group(2).endswith(")") else m.group(2) + "()"
+        return "Test case '%s.%s' %s on '%s' (%.3f seconds)" % (m.group(1).split(".")[-1], name, m.group(3), where,
+                                                               float(m.group(4)))
+    return None
+
+
 def xcodebuild_report(s, action, p):
     """xcodebuild's own closing lines (Xcode 27.2): where the result bundle is, the failing tests as it names them
     (XCTest's "Class.test()", Swift Testing's "<innermost suite>.test()" or the function alone), its verdict"""
@@ -2353,8 +2376,9 @@ def xcodebuild_report(s, action, p):
         p("")
     p("** TEST %s%s **" % ("EXECUTE " if action == "test-without-building" else "",
                            "SUCCEEDED" if s["result"] == "passed" else "FAILED"))
-    p("")
-    p("Testing started")
+    if not s.get("_multi"):   # (several destinations: each device's "Testing started" came first)
+        p("")
+        p("Testing started")
 
 
 def report(s, quiet, action=None):
@@ -2422,7 +2446,7 @@ def parse(argv):
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
          "built": False, "build_log": None, "xcodebuild": None,
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
-         "max_allowance": None, "only_config": [], "skip_config": []}
+         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2458,6 +2482,8 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--also-on":
+            a["more_phones"].append(val())
         elif k == "--only-test-configuration":
             a["only_config"].append(val())
         elif k == "--skip-test-configuration":
@@ -2521,6 +2547,72 @@ def main(argv):
             return build_failed(a, blog)
     if not (a["xctestrun"] or a["app"] or a["bundles"] or a["runner"] or a["spm"]):
         die("nothing to run\n" + USAGE)
+    phones = [None] + list(a["more_phones"])   # None: the device x86sim picked (X86SIM_DEVICE)
+    a["multi"] = len(phones) > 1
+    first_dev = os.environ.get("X86SIM_DEVICE")
+    results = []
+    for ph in phones:
+        if ph is not None:
+            dev = device_path(ph)
+            if not dev:
+                die("no device %s" % ph)
+            os.environ["X86SIM_DEVICE"] = dev
+            x86config._cfg = None   # config.sh again, for this device
+            if "simctl" in sys.modules:   # simctl binds its device's data dir when imported
+                import importlib
+                importlib.reload(sys.modules["simctl"])
+        b = dict(a)
+        if ph is not None and a["out"]:
+            b["out"] = "%s-%s" % (a["out"].rstrip("/"), ph)
+        s, run, root = run_on_device(b, blog)
+        results.append((s, run, root))
+    if first_dev is not None:
+        os.environ["X86SIM_DEVICE"] = first_dev
+        x86config._cfg = None
+    summaries = [r[0] for r in results]
+    s = summaries[0]
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            if len(summaries) > 1:   # one action per device, as xcodebuild with several -destination
+                xcresult.write_many(summaries, a["result_bundle"], results[0][2])
+            else:
+                xcresult.write(s, a["result_bundle"], results[0][2])
+            for x in summaries:
+                x["result_bundle"] = os.path.abspath(a["result_bundle"])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    if a["json"] == "-":
+        json.dump(s if len(summaries) == 1 else summaries, sys.stdout, indent=1)
+        print()
+    elif a["json"]:
+        with open(a["json"], "w") as f:
+            json.dump(s if len(summaries) == 1 else summaries, f, indent=1)
+    if len(summaries) == 1:
+        report(s, a["quiet"], a["xcodebuild"])
+    else:
+        merged = dict(s, targets=[t for x in summaries for t in x["targets"]], _multi=True,
+                      result="passed" if all(x["result"] == "passed" for x in summaries) else "failed")
+        if a["xcodebuild"]:
+            report(merged, a["quiet"], a["xcodebuild"])
+        else:
+            for x in summaries:
+                report(x, a["quiet"])
+    if not all(x["targets"] for x in summaries):
+        return 2
+    return 0 if all(x["result"] == "passed" for x in summaries) else 1
+
+
+def device_path(name):
+    """a device by name (as x86sim names them: var/device-a64-<name>), folder or path"""
+    for c in (name, os.path.join(ROOT, "var", name), os.path.join(ROOT, "var", "device-a64-" + name)):
+        if os.path.isdir(c) and os.path.exists(os.path.join(c, "runtime")):
+            return os.path.realpath(c)
+    return None
+
+
+def run_on_device(a, blog):
+    """The run on one device (X86SIM_DEVICE): its summary, written as results.json and junit.xml"""
     run = Runner(a)
     try:
         if a["xctestrun"]:
@@ -2531,6 +2623,8 @@ def main(argv):
             root, targets = explicit_targets(a)
     except (RuntimeError, OSError, plistlib.InvalidFileException) as e:
         die(str(e))
+    if a["multi"] and a["xcodebuild"] and not a["quiet"]:
+        print("Testing started", flush=True)
     s = run.run(root, targets)
     if a["built"] or blog:
         s["build"] = "succeeded"   # the result bundle's build action (xcodebuild test built the products)
@@ -2543,26 +2637,12 @@ def main(argv):
     x = junit(s)
     with open(os.path.join(run.out, "junit.xml"), "w") as f:
         f.write(x)
-    if a["junit"]:
+    if a["junit"] and not a["multi"]:
         with open(a["junit"], "w") as f:
             f.write(x)
-    if a["result_bundle"]:
-        import xcresult
-        try:
-            xcresult.write(s, a["result_bundle"], root)
-            s["result_bundle"] = os.path.abspath(a["result_bundle"])
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
-    if a["json"] == "-":
-        json.dump(s, sys.stdout, indent=1)
-        print()
-    elif a["json"]:
-        with open(a["json"], "w") as f:
-            json.dump(s, f, indent=1)
-    report(s, a["quiet"], a["xcodebuild"])
-    if not s["targets"]:
-        return 2
-    return 0 if s["result"] == "passed" else 1
+    if a["multi"] and a["xcodebuild"] and not a["quiet"]:
+        print("Testing %s on '%s'" % ("passed" if s["result"] == "passed" else "failed", s["phone"]), flush=True)
+    return s, run, root
 
 
 if __name__ == "__main__":
