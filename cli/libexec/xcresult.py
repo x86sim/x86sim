@@ -911,6 +911,37 @@ class Writer:
                  testKind=S(KINDS.get(target.get("kind"), "app hosted")), tests=[top] + swift_tests, diagnosticsDirectoryName=S(""),
                  failureSummaries=[], testLanguage=S(""), testRegion=S(""))
 
+    def build_log(self, log):
+        """The build's ActivityLogSection (log: `xcresulttool get log --type build`'s shape, which the xcodebuild
+        stand-in writes from Swift Build's tasks): its id"""
+        def message(m):
+            loc = None
+            if (m.get("location") or {}).get("path"):
+                lc = m["location"]
+                loc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                        url=S(text_location(lc["path"], lc.get("line"), lc.get("column"))))
+            return O("ActivityLogMessage", type=S(m.get("type") or "notice"), title=S(m.get("title")),
+                     shortTitle=S(m.get("shortTitle")), category=S(m.get("category")), location=loc,
+                     annotations=[O("ActivityLogMessageAnnotation", title=S(a.get("title")))
+                                  for a in m.get("annotations") or []])
+
+        def section(n, top=False):
+            f = dict(domainType=S(n.get("domainType")), title=S(n.get("title")), startTime=T(n.get("startTime")),
+                     duration=D(n.get("duration") or 0), result=S(n.get("result")),
+                     subsections=[section(x) for x in n.get("subsections") or []],
+                     messages=[message(m) for m in n.get("messages") or []], attachments=[])
+            c = n.get("commandInvocationDetails")
+            if c and not top:
+                f.update(commandDetails=S(c.get("commandDetails")), emittedOutput=S(c.get("emittedOutput") or ""),
+                         exitCode=I(c.get("exitCode") or 0))
+                if n.get("location"):
+                    f["location"] = O("DocumentLocation", concreteTypeName=S("DVTDocumentLocation"),
+                                      url=S("file://" + urllib.parse.quote(n["location"])))
+                return O("ActivityLogCommandInvocationSection", **f)
+            return O("ActivityLogSection", **f)
+
+        return self.st.obj(section(log, True))
+
     def log_section(self, target, start):
         """The target's part of the action log: its process's output, as Xcode keeps it."""
         try:
@@ -962,14 +993,22 @@ class Writer:
         nf = c.get("failed", sum(1 for x in all_tests if x.get("result") == "failed"))
         ns = c.get("skipped", sum(1 for x in all_tests if x.get("result") == "skipped"))
 
-        def metrics(tests=True):
-            return O("ResultMetrics", analyzerWarningCount=I(0), errorCount=I(0), warningCount=I(0),
+        # the build's errors and warnings (the xcodebuild stand-in's build log: x86sim test --build-log), and Xcode's
+        # own error when the build failed: the test action is cancelled
+        b_err = [build_issue(i) for i in s.get("build_issues") or [] if i.get("severity") == "error"]
+        b_warn = [build_issue(i) for i in s.get("build_issues") or [] if i.get("severity") == "warning"]
+        built_failed = s.get("build") == "failed"
+        a_err = [O("IssueSummary", issueType=S("Uncategorized"), message=S("Testing cancelled because the build failed."))] \
+            if built_failed else []
+
+        def metrics(tests=True, errors=0, warnings=0):
+            return O("ResultMetrics", analyzerWarningCount=I(0), errorCount=I(errors), warningCount=I(warnings),
                      testsCount=I(n if tests else 0), testsFailedCount=I(nf if tests else 0),
                      testsSkippedCount=I(ns if tests else 0))
 
-        def issues(fails):
-            return O("ResultIssueSummaries", analyzerWarningSummaries=[], errorSummaries=[], testFailureSummaries=fails,
-                     warningSummaries=[], testWarningSummaries=[])
+        def issues(fails, errors=(), warnings=()):
+            return O("ResultIssueSummaries", analyzerWarningSummaries=[], errorSummaries=list(errors),
+                     testFailureSummaries=fails, warningSummaries=list(warnings), testWarningSummaries=[])
 
         nocov = O("CodeCoverageInfo", hasCoverageData=B(False))
         cov, pct = nocov, None
@@ -981,13 +1020,18 @@ class Writer:
             cov = O("CodeCoverageInfo", hasCoverageData=B(True), reportRef=Ref(self.st.put(rep[0])), archiveRef=Ref(arch))
             pct = rep[1] / rep[2] if rep[2] else 0.0
         self.coverage_fraction = pct
-        action = O("ActionResult", resultName=S("action"), status=S("failed" if failed else "succeeded"), metrics=metrics(),
-                   issues=issues(self.issues), coverage=cov, logRef=Ref(log_ref, "ActivityLogSection"),
+        action = O("ActionResult", resultName=S("action"),
+                   status=S("cancelled" if built_failed else "failed" if failed else "succeeded"),
+                   metrics=metrics(errors=len(a_err)),
+                   issues=issues(self.issues, a_err), coverage=cov, logRef=Ref(log_ref, "ActivityLogSection"),
                    testsRef=Ref(tests_ref, "ActionTestPlanRunSummaries"), diagnosticsRef=Ref(diag) if diag else None)
-        # Xcode's build action: "notRequested" for test-without-building (x86sim test), "succeeded" when the run built
-        # the products first (the xcodebuild stand-in's test: x86sim test --built), still without its log
-        build = O("ActionResult", resultName=S("build"), status=S(s.get("build") or "notRequested"), metrics=metrics(False),
-                  issues=issues([]), coverage=nocov)
+        # Xcode's build action: "notRequested" for test-without-building (x86sim test), "succeeded" / "failed" when the
+        # run built the products first (the xcodebuild stand-in's test: x86sim test --built / --build-log), with the
+        # build's activity log when there is one
+        blog = self.build_log(s.get("build_log")) if s.get("build_log") else None
+        build = O("ActionResult", resultName=S("build"), status=S(s.get("build") or "notRequested"),
+                  metrics=metrics(False, len(b_err), len(b_warn)), issues=issues([], b_err, b_warn), coverage=nocov,
+                  logRef=Ref(blog, "ActivityLogSection") if blog else None)
         dest = O("ActionRunDestinationRecord", displayName=S(di["name"]), targetArchitecture=S(di["arch"]),
                  targetDeviceRecord=device_record(di), localComputerRecord=host_record(),
                  targetSDKRecord=O("ActionSDKRecord", name=S(di["sdkname"]), identifier=S(di["sdk"]),
@@ -1003,11 +1047,34 @@ class Writer:
                              schemeIdentifier=O("EntityIdentifier", entityName=S(self.scheme),
                                                 containerName=S("%s project" % self.project), entityType=S("scheme"),
                                                 sharedState=S("shared"))))
-        top = metrics()
+        top = metrics(errors=len(b_err) + len(a_err), warnings=len(b_warn))
         top.f["totalCoveragePercentage"] = D(pct)
         root = self.st.obj(O("ActionsInvocationRecord", metadataRef=Ref(meta, "ActionsInvocationMetadata"),
-                             metrics=top, issues=issues(self.issues), actions=[rec]))
+                             metrics=top, issues=issues(self.issues, b_err + a_err, b_warn), actions=[rec]))
         return root
+
+
+def text_location(path, line=None, column=None, when=None):
+    """A DVTTextDocumentLocation URL as Xcode writes one for a build issue (0-based line and column)"""
+    frag = []
+    if line:
+        ln = max(0, int(line) - 1)
+        col = max(0, int(column or 1) - 1)
+        frag = ["EndingColumnNumber=%d" % col, "EndingLineNumber=%d" % ln, "StartingColumnNumber=%d" % col,
+                "StartingLineNumber=%d" % ln]
+        if when:
+            frag.append("Timestamp=%.6f" % (when - 978307200))   # seconds since 2001 (Apple's reference date)
+    return "file://%s%s" % (urllib.parse.quote(path), "#" + "&".join(frag) if frag else "")
+
+
+def build_issue(i):
+    """IssueSummary of a build error / warning (the xcodebuild stand-in's build-log.json "issues")"""
+    doc = None
+    if i.get("file"):
+        doc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                url=S(text_location(i["file"], i.get("line"), i.get("column"), i.get("time"))))
+    return O("IssueSummary", issueType=S(i.get("type") or "Uncategorized"), message=S(i.get("message") or ""),
+             documentLocationInCreatingWorkspace=doc)
 
 
 def write(summary, bundle_path, products_root=None):

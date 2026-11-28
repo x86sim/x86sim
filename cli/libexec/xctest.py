@@ -58,6 +58,8 @@ Options:
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
   --built                 the products were built for this run (xcodebuild test, not test-without-building): the
                           result bundle's build action succeeded instead of "not requested"
+  --build-log FILE        the same, with the build's log and issues (the xcodebuild stand-in's build-log.json); a
+                          failed build runs nothing and writes the result bundle Xcode writes then (testing cancelled)
   --json FILE, --junit FILE
                           also write the JSON summary / JUnit XML there ("-": JSON to stdout, nothing else printed)
   --timeout S             per test target (default 1800)
@@ -2060,6 +2062,47 @@ def summary(run, results, t0):
             "result": "passed" if ok else "failed", "counts": counts, "out": run.out, "targets": results}
 
 
+def build_failed(a, blog):
+    """x86sim test --build-log of a build that failed: no test runs; results.json and the result bundle say what Xcode's
+    say then (the build's errors, "Testing cancelled because the build failed.")"""
+    try:
+        dev = x86config.device()
+        plat, rt = device_platform(dev)
+    except SystemExit:
+        dev, plat, rt = None, "ios", None
+    log = blog.get("log") or {}
+    t0 = float(log.get("startTime") or time.time())
+    out = a["out"] or os.path.join(x86config.get("X86SIM_SCRATCH"), "xctest", "build-" + time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(out, exist_ok=True)
+    s = {"phone": os.path.basename(dev or "").replace("device-a64-", "", 1) or None, "device": dev, "runtime": rt,
+         "platform": plat, "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "started_unix": round(t0, 3),
+         "duration": round(time.time() - t0, 3), "result": "failed",
+         "counts": {"passed": 0, "failed": 0, "skipped": 0, "expected_failures": 0, "total": 0}, "out": out,
+         "targets": [], "build": "failed", "build_log": log, "build_issues": blog.get("issues") or [],
+         "error": "the build failed"}
+    for k in ("project", "scheme"):
+        if blog.get(k):
+            s[k] = blog[k]
+    with open(os.path.join(out, "results.json"), "w") as f:
+        json.dump(s, f, indent=1)
+    if a["json"] == "-":
+        json.dump(s, sys.stdout, indent=1)
+    elif a["json"]:
+        with open(a["json"], "w") as f:
+            json.dump(s, f, indent=1)
+    if a["result_bundle"]:
+        import xcresult
+        try:
+            xcresult.write(s, a["result_bundle"], None)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print("x86sim test: result bundle not written: %s" % e, file=sys.stderr)
+    for i in s["build_issues"]:
+        if i.get("severity") == "error" and not a["quiet"]:
+            print("x86sim test: build error: %s%s" % ("%s:%s: " % (i["file"], i.get("line")) if i.get("file") else "",
+                                                     i.get("message")), file=sys.stderr)
+    return 1
+
+
 def junit(s):
     root = ET.Element("testsuites", name="x86sim test", tests=str(s["counts"]["total"]),
                       failures=str(s["counts"]["failed"]), skipped=str(s["counts"]["skipped"]), time="%.3f" % s["duration"])
@@ -2159,7 +2202,7 @@ def parse(argv):
     a = {"xctestrun": None, "products": None, "app": None, "bundles": [], "runner": None, "spm": None, "only": [],
          "skip": [], "targets": [], "platform": None, "out": None, "json": None, "junit": None, "timeout": 1800.0,
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
-         "built": False}
+         "built": False, "build_log": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2197,6 +2240,8 @@ def parse(argv):
             a["junit"] = val()
         elif k == "--built":
             a["built"] = True
+        elif k == "--build-log":
+            a["build_log"] = val()
         elif k == "--result-bundle":
             a["result_bundle"] = val()
         elif k == "--timeout":
@@ -2225,6 +2270,15 @@ def main(argv):
     if argv and argv[0] == "fetch-platform":
         return fetch_platform(argv[1:])
     a = parse(argv)
+    blog = None
+    if a["build_log"]:
+        try:
+            with open(a["build_log"]) as f:
+                blog = json.load(f)
+        except (OSError, ValueError) as e:
+            die("--build-log %s: %s" % (a["build_log"], e))
+        if blog.get("status") == "failed":
+            return build_failed(a, blog)
     if not (a["xctestrun"] or a["app"] or a["bundles"] or a["runner"] or a["spm"]):
         die("nothing to run\n" + USAGE)
     run = Runner(a)
@@ -2238,8 +2292,10 @@ def main(argv):
     except (RuntimeError, OSError, plistlib.InvalidFileException) as e:
         die(str(e))
     s = run.run(root, targets)
-    if a["built"]:
+    if a["built"] or blog:
         s["build"] = "succeeded"   # the result bundle's build action (xcodebuild test built the products)
+    if blog:
+        s["build_log"], s["build_issues"] = blog.get("log"), blog.get("issues") or []
     if a.get("spm_project"):   # the package: the .xcresult's project and scheme, as Xcode names them
         s.setdefault("project", a["spm_project"])
     with open(os.path.join(run.out, "results.json"), "w") as f:

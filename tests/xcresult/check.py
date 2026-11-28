@@ -190,6 +190,13 @@ def mac_tool(remote, name, run):
         check(rc == 0 and "ActionTestPlanRunSummaries" in out, "%s: get object --legacy --id <testsRef>" % name)
     rc, out, err = get("get log --type action --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get log --type action" % name)
+    # the build: its status and issues; its log when the run built the products (the xcodebuild stand-in's test)
+    rc, out, err = get("get build-results --path %s" % b)
+    check(rc == 0 and out.strip().startswith("{"), "%s: get build-results" % name)
+    res["build"] = json.loads(out) if rc == 0 else {}
+    if res["build"].get("status") not in (None, "notRequested"):
+        rc, out, err = get("get log --type build --path %s" % b)
+        check(rc == 0 and out.strip().startswith("{"), "%s: get log --type build" % name)
     res["legacy_issues"] = legacy_issues(remote + "/" + name)
     # every test's details and activities
     ids = []
@@ -203,7 +210,9 @@ def mac_tool(remote, name, run):
             bad.append(tid)
         else:
             res["details"][tid] = json.loads(o1)
-    check(ids and not bad, "%s: test-details + activities for all %d tests%s" % (name, len(ids), " (bad: %s)" % bad if bad else ""))
+    # a run whose build failed has no tests (Xcode's too)
+    check((ids or not res["summary"].get("totalTestCount")) and not bad,
+          "%s: test-details + activities for all %d tests%s" % (name, len(ids), " (bad: %s)" % bad if bad else ""))
     # attachments: every one in results.json comes out of export attachments, byte for byte
     want = {}
     for t in run.get("targets", []):
