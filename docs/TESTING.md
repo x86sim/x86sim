@@ -75,7 +75,11 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   the session log, which XCTest would otherwise print among the test output). `tests/xcresult/check.py` compares
   bundles with Apple's on the comparison Mac: test-details, the legacy issue summaries, frames, activities, the
   action log and the diagnostics' files.
-  The `xcodebuild` stand-in writes the bundle at `-resultBundlePath` and `x86sim test`'s own output next to it
+  The `xcodebuild` stand-in writes the bundle at `-resultBundlePath` (without it, where Xcode does:
+  `<derived data>/Logs/Test/Test-<Scheme>-<time>.xcresult`), prints what `xcodebuild` prints (its "Command line
+  invocation:", the test processes' output, "Test session results, code coverage, and logs:", "Failing tests:" as
+  Xcode names them, `** TEST [EXECUTE ]SUCCEEDED / FAILED **`, which CI log parsers read; `x86sim test
+  --xcodebuild ACTION` does the same) and puts `x86sim test`'s own output next to the bundle
   (`<bundle>.x86sim/`). Its `test` also puts the build in it, as Xcode does: the build log (`xcresulttool get log
   --type build`: one section per Swift Build task that ran, with Xcode's titles, commands and times, read from the
   build's `XCBuildData`), its errors and warnings (`get build-results`, with the issue types of the compilers'

@@ -56,6 +56,8 @@ Options:
   --result-bundle B.xcresult
                           also write an Xcode result bundle (what xcodebuild -resultBundlePath writes; xcresulttool,
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
+  --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
+                          result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
   --built                 the products were built for this run (xcodebuild test, not test-without-building): the
                           result bundle's build action succeeded instead of "not requested"
   --build-log FILE        the same, with the build's log and issues (the xcodebuild stand-in's build-log.json); a
@@ -213,6 +215,10 @@ def identifier_set(ids, skip=False):
 
 # Swift Testing's Interop.Mode, as an .xctestrun names it (TestInteropMode); Xcode 27.2 writes "complete"
 INTEROP_MODES = {"none": 0, "limited": 1, "complete": 2, "strict": 3}
+
+
+# lines x86Sim's own pieces print in a test process's output (libsimshim, the translator, dyld_sim's note)
+X86SIM_LINE = re.compile(r"^(simshim: |arm64host: |a64: |DYLD_SHARED_REGION=avoid not supported for simulator$)")
 
 
 # an .xctestrun's SystemAttachmentLifetime / UserAttachmentLifetime as XCTestConfiguration has them (XCTAttachmentLifetime)
@@ -1495,7 +1501,8 @@ class Runner:
             pass
 
     def say(self, msg):
-        if not self.a["quiet"]:
+        """x86sim test's progress lines (not as xcodebuild: it says none, unless --verbose)"""
+        if not self.a["quiet"] and (not self.a["xcodebuild"] or self.a["verbose"]):
             print(msg, flush=True)
 
     def setup_platform(self):
@@ -1646,6 +1653,8 @@ class Runner:
         end = time.monotonic() + timeout
         last_alive, gone_since, done_at = 0.0, None, None
         verbose, quiet = self.a["verbose"], self.a["quiet"]
+        # xcodebuild prints all of a test process's output, not x86Sim's own lines (libsimshim, the translator)
+        xb = bool(self.a["xcodebuild"])
         while True:
             try:
                 with open(outf, "rb") as f:
@@ -1661,7 +1670,7 @@ class Runner:
                 for l in lines:
                     s = l.decode(errors="replace").rstrip("\r")
                     own = parser.line(s)
-                    if not quiet and (verbose or own):
+                    if not quiet and (verbose or own or (xb and not X86SIM_LINE.match(s))):
                         print(s, flush=True)
                 if parser.done and done_at is None:
                     done_at = time.monotonic()
@@ -2199,10 +2208,35 @@ def junit(s):
     return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
 
 
-def report(s, quiet):
-    """xcodebuild's closing lines: the failing tests and TEST SUCCEEDED / FAILED."""
+def xcodebuild_report(s, action, p):
+    """xcodebuild's own closing lines (Xcode 27.2): where the result bundle is, the failing tests as it names them
+    (XCTest's "Class.test()", Swift Testing's "<innermost suite>.test()" or the function alone), its verdict"""
+    p("Test session results, code coverage, and logs:")
+    p("\t%s" % (s.get("result_bundle") or s["out"]))
+    p("")
+    fails = [t for r in s["targets"] for t in r["tests"] if t["result"] == "failed"]
+    if fails:
+        p("Failing tests:")
+        for t in fails:
+            if t.get("swift_testing"):
+                suite = (t.get("suite") or [])[-1:]
+                p("\t%s" % ".".join(suite + [t["name"]]))
+            else:
+                n = t["name"] if t["name"].endswith(")") else t["name"] + "()"
+                p("\t%s.%s" % (t["class"].split(".")[-1], n))
+        p("")
+    p("** TEST %s%s **" % ("EXECUTE " if action == "test-without-building" else "",
+                           "SUCCEEDED" if s["result"] == "passed" else "FAILED"))
+    p("")
+    p("Testing started")
+
+
+def report(s, quiet, action=None):
+    """x86sim test's closing lines: the failing tests and TEST SUCCEEDED / FAILED (--xcodebuild: xcodebuild's own)"""
     c = s["counts"]
     p = (lambda *x: print(*x, file=sys.stderr)) if quiet == "json" else print
+    if action:
+        return xcodebuild_report(s, action, p)
     p("\nTest session results: %s" % s["out"])
     xf = c.get("expected_failures") or 0
     p("\t%d tests: %d passed, %d failed, %d skipped%s in %.1f s on %s" % (
@@ -2260,7 +2294,7 @@ def parse(argv):
     a = {"xctestrun": None, "products": None, "app": None, "bundles": [], "runner": None, "spm": None, "only": [],
          "skip": [], "targets": [], "platform": None, "out": None, "json": None, "junit": None, "timeout": 1800.0,
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
-         "built": False, "build_log": None}
+         "built": False, "build_log": None, "xcodebuild": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2296,6 +2330,10 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--xcodebuild":
+            a["xcodebuild"] = val()
+            if a["xcodebuild"] not in ("test", "test-without-building"):
+                die("--xcodebuild: test or test-without-building")
         elif k == "--built":
             a["built"] = True
         elif k == "--build-log":
@@ -2377,7 +2415,7 @@ def main(argv):
     elif a["json"]:
         with open(a["json"], "w") as f:
             json.dump(s, f, indent=1)
-    report(s, a["quiet"])
+    report(s, a["quiet"], a["xcodebuild"])
     if not s["targets"]:
         return 2
     return 0 if s["result"] == "passed" else 1
