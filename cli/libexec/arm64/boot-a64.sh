@@ -724,6 +724,26 @@ for name in ("IconState.plist", "DesiredIconState.plist"):
 	print(f"  stripped widgets from {name}", flush=True)
 PY
 fi
+# Accessibility off at boot, as on a fresh simulator. host/simax turns automation and app accessibility on the first
+# time a process is asked for its tree (_AXSSetAutomationEnabled, _AXSApplicationAccessibilitySetEnabled), and those
+# are the device's preferences: they stayed on across boots, so every app of a phone inspected once exposed its
+# accessibility elements as if VoiceOver ran (sdkcov func:SwiftUI.p27-accessibility-elements: 4 elements, Apple's
+# simulator 0). simax turns them on again when the phone is inspected.
+python3 - "$D/data/Library/Preferences/com.apple.Accessibility.plist" <<'PY'
+import os, plistlib, sys
+path = sys.argv[1]
+if os.path.exists(path):
+	with open(path, "rb") as f:
+		prefs = plistlib.load(f)
+	on = [k for k in ("AutomationEnabled", "ApplicationAccessibilityEnabled") if prefs.get(k)]
+	if on:
+		for k in on:
+			prefs[k] = 0
+		with open(path + ".new", "wb") as f:
+			plistlib.dump(prefs, f, fmt=plistlib.FMT_BINARY)
+		os.replace(path + ".new", path)
+		print("  accessibility automation off (left on by an inspection: %s)" % ", ".join(on), flush=True)
+PY
 UDID=$(sed -n 's/^SIMULATOR_UDID=//p' "$D/sim.env")
 L=$DPREFIX/private/var/tmp/com.apple.CoreSimulator.SimDevice.$UDID/launchd.log
 rm -f "$L" "$L".1 "$L".2

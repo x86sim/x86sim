@@ -79,8 +79,9 @@ NSDictionary* simax_unity_type(NSDictionary* req);
 // ---------------------------------------------------------------------------------------------------------------------
 // Accessibility bundles. Without them UIKit answers only for its own controls: SpringBoard's icons, SwiftUI views and
 // most system UI have no labels. UIKit loads them at launch when accessibility automation is on (what XCUITest turns
-// on); a running process loads them when the AX preference changes. We turn automation on in-process only, the first
-// time a process is asked for its tree, so a phone nobody inspects pays nothing.
+// on); a running process loads them when the AX preference changes. We turn automation on the first time a process is
+// asked for its tree, so a phone nobody inspects pays nothing. The two settings are the device's preferences (every app
+// launched afterwards gets the bundles too): boot-a64.sh turns them off again at the next boot.
 // true the first time (the caller's answer is then taken before the bundles labelled anything: the host asks again)
 static bool load_ax(void) {
 	if (atomic_exchange(&g_ax_loaded, true)) return false;
