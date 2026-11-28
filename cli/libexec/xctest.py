@@ -68,6 +68,8 @@ Options:
                           run a failed test again, up to 3 times (or --test-iterations): it passes when a run passes
   --run-tests-until-failure
                           run each test until it fails, up to 100 times (or --test-iterations)
+  --test-repetition-relaunch
+                          each repetition a new test process (xcodebuild -test-repetition-relaunch-enabled YES)
   --test-timeouts-enabled YES|NO, --default-test-execution-time-allowance S, --maximum-test-execution-time-allowance S
                           XCTest's per-test time limits (xcodebuild's options of those names)
   --built                 the products were built for this run (xcodebuild test, not test-without-building): the
@@ -297,7 +299,8 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "performanceTestConfiguration": None, "preferredScreenCaptureFormat": 1, "productModuleName": module,
         "randomExecutionOrderingSeed": None,
         "repetitionPolicy": Obj(["XCTRepetitionPolicy", "NSObject"],
-                                {"XCTMaximumIterations": rep[1] if rep else 1, "XCTRepeatInNewRunnerProcess": False,
+                                {"XCTMaximumIterations": rep[1] if rep else 1,
+                                 "XCTRepeatInNewRunnerProcess": bool(rep and opts.get("relaunch")),
                                  "XCTRepetitionMode": rep[0] if rep else 0}),
         # no IDE session: XCTest reports to its log only (reportResultsToIDE / sessionIdentifier unset)
         "reportActivities": True, "reportResultsToIDE": False, "resultChannelConfiguration": None,
@@ -1777,10 +1780,69 @@ class Runner:
                 return "timeout"
             time.sleep(0.2)
 
-    def run_target(self, t):
+    def run_repeated(self, t):
+        """A target with -test-repetition-relaunch-enabled: each repetition a new test process, as Xcode relaunches it
+        ("Running tests repeatedly N times."): fixed iterations run it N times, until-failure until a test fails,
+        retry-on-failure again while a test fails (all of them, as Xcode); the runs are kept per test as in-process
+        repetitions ("iterations", Xcode's verdicts; none when it ran once)."""
+        rep = repetition(self.a)
+        if not (rep and self.a.get("relaunch")):
+            return self.run_target(t)
+        mode, total, name = rep
+        if selection(t, self.a["only"], self.a["skip"], self.names) is None:
+            return None   # not selected
+        if not self.a["quiet"] and not getattr(self, "_noted", False):   # xcodebuild's line for each kind, once
+            self._noted = True
+            note = {3: "Running tests repeatedly %d times." % total,
+                    1: "Running tests multiple times until a failure occurs. Running tests repeatedly up to %d times." % total,
+                    2: "Retrying tests on failure. Running tests repeatedly up to %d times." % total}[mode]
+            if mode != 3 and not self.a.get("iterations"):
+                note += " Pass -test-iterations also to override the default of running up to %d times." % total
+            print(note, flush=True)
+        runs = []
+        for k in range(1, total + 1):
+            r = self.run_target(t, iteration=k)
+            if r is None:
+                break
+            runs.append(r)
+            failed = [x for x in r["tests"] if x["result"] == "failed"]
+            if mode == 1 and failed:
+                break   # until failure
+            if mode == 2 and not failed:
+                break   # retry on failure: Xcode relaunches every test while one fails
+        if not runs:
+            return None
+        res = dict(runs[0])
+        if len(runs) == 1:
+            return res   # one run: no repetitions to keep (Xcode shows none)
+        tests, order = {}, []
+        for k, r in enumerate(runs, 1):
+            for x in r["tests"]:
+                key = (x["class"], x["name"])
+                if key not in tests:
+                    tests[key] = dict(x, iterations=[])
+                    order.append(key)
+                tests[key]["iterations"].append(dict({f: x[f] for f in Parser.PER_RUN if f in x}, iteration=k,
+                                                     started=x.get("started")))
+        for key in order:
+            x = tests[key]
+            results = [i.get("result") for i in x["iterations"]]
+            x["result"] = results[-1] if mode == 2 else "failed" if "failed" in results else results[-1]
+            x["failures"] = [f for i in x["iterations"] for f in i.get("failures") or []]
+            x["duration"] = round(sum(float(i.get("duration") or 0) for i in x["iterations"]), 6)
+            x["repetition"] = {"mode": name, "total": total, "relaunch": True}
+        res["tests"] = [tests[k] for k in order]
+        res["duration"] = round(sum(r["duration"] for r in runs), 3)
+        res["logs"] = [r["log"] for r in runs]
+        res["result"] = "failed" if any(x["result"] == "failed" for x in res["tests"]) or "error" in res else "passed"
+        return res
+
+    def run_target(self, t, iteration=None):
         name, kind = t["_name"], kind_of(t)
         # a test plan's configuration: the target runs once per configuration; its files are named for both
         stem = "%s-%s" % (name, re.sub(r"[^A-Za-z0-9._-]+", "_", t["_config"])) if t.get("_multi") else name
+        if iteration and iteration > 1:   # a relaunched repetition's files
+            stem += "-run%d" % iteration
         sel = selection(t, self.a["only"], self.a["skip"], self.names)
         res = {"name": name, "kind": kind, "result": "failed", "tests": [], "duration": 0.0, "log": None}
         if t.get("_config"):
@@ -2127,7 +2189,7 @@ class Runner:
         self.names = {n for t in targets for n in [t["_name"]] + list(t.get("_modules", ()))}
         self.scheme = self.scheme_info(targets)
         t0 = time.time()
-        results = [r for r in (self.run_target(t) for t in targets) if r]
+        results = [r for r in (self.run_repeated(t) for t in targets) if r]
         cov = coverage(self.profraw, self.root, os.path.join(self.out, "coverage"), self.say) if self.a["coverage"] else None
         try:
             shutil.rmtree(self.work)
@@ -2446,7 +2508,7 @@ def parse(argv):
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
          "built": False, "build_log": None, "xcodebuild": None,
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
-         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False}
+         "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2490,6 +2552,8 @@ def parse(argv):
             a["skip_config"].append(val())
         elif k == "--test-iterations":
             a["iterations"] = int(val())
+        elif k == "--test-repetition-relaunch":
+            a["relaunch"] = True
         elif k == "--retry-tests-on-failure":
             a["retry"] = True
         elif k == "--run-tests-until-failure":
