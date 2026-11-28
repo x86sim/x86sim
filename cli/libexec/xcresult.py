@@ -737,11 +737,15 @@ class Writer:
                          failureSummaryIDs=[], expectedFailureIDs=[], warningSummaryIDs=[]))
         return out
 
-    def test_summary(self, target, t, start, skips, arg=None):
+    def test_summary(self, target, t, start, skips, arg=None, run=None):
         """A test's ActionTestMetadata (+ its summary). Swift Testing's (x86sim test's "swift_testing" entries) are
         identified by their suite path (Second/Inner/same()), as Xcode does; arg: one test case of a parameterized one
         (Xcode keeps each: the same identifier, ?args=<argument ID hash> in its URL, its arguments)."""
         swift = bool(t.get("swift_testing"))
+        rep = t.get("repetition")
+        if run:   # one run of a repeated test (-test-iterations, retries): Xcode keeps each, ?i=<run> in its URL
+            t = dict(t, result=run.get("result"), duration=run.get("duration"), failures=run.get("failures") or [],
+                     expected_failures=run.get("expected_failures") or [], skip_message=run.get("skip_message"))
         if arg:
             t = dict(t, result=arg.get("result"), duration=arg.get("duration"), failures=arg.get("failures") or [],
                      expected_failures=arg.get("expected_failures") or [])
@@ -753,7 +757,9 @@ class Writer:
         url = self.url(target["name"], *ident.split("/")) if swift else self.url(target["name"], cls, t["name"])
         if arg:
             url += "?args=" + arg["id"]
-        key = ident + ("?" + arg["id"] if arg else "")
+        if run:
+            url += "?i=%d" % run["iteration"]
+        key = ident + ("?" + arg["id"] if arg else "") + ("?i=%d" % run["iteration"] if run else "")
         status = {"passed": "Success", "failed": "Failure", "skipped": "Skipped",
                   "expected_failure": "Expected Failure"}.get(t.get("result"), "Failure")
         lifetime = "deleteOnSuccess" if status == "Failure" else "keepAlways"
@@ -831,10 +837,12 @@ class Writer:
                           typeName=S(a.get("value_type")), fullyQualifiedTypeName=S(a.get("value_full_type")),
                           isCollection=B(bool(a.get("is_collection")))))
                 for a in (arg or {}).get("args") or []]
+        reps = O("ActionTestRepetitionPolicySummary", iteration=I(run["iteration"]), totalIterations=I((rep or {}).get("total")),
+                 repetitionMode=S((rep or {}).get("mode"))) if run else None
         summ = O("ActionTestSummary", name=S(name), identifier=S(ident), identifierURL=S(url),
                  testStatus=S(status), duration=D(dur), performanceMetrics=[], failureSummaries=fails, expectedFailures=expected,
                  skipNoticeSummary=skip, activitySummaries=acts, arguments=args, warningSummaries=[], documentation=[],
-                 trackedIssues=[], tags=[])
+                 trackedIssues=[], tags=[], repetitionPolicySummary=reps)
         ref = self.st.obj(summ)
         return O("ActionTestMetadata", name=S(name), identifier=S(ident), identifierURL=S(url),
                  testStatus=S(status), duration=D(dur), summaryRef=Ref(ref, "ActionTestSummary"),
@@ -887,10 +895,11 @@ class Writer:
             if cls not in classes:
                 classes[cls] = []
                 order.append(cls)
-            at = when(t)
-            md, dur = self.test_summary(target, t, at, skips)
-            clock = at + dur
-            classes[cls].append((md, dur))
+            for r in t.get("iterations") or [None]:
+                at = when(r) if r and r.get("started") else when(t) if not r or r["iteration"] == 1 else clock
+                md, dur = self.test_summary(target, t, at, skips, run=r)
+                clock = at + dur
+                classes[cls].append((md, dur))
         groups, total = [], 0.0
         for cls in order:
             dur = sum(d for _, d in classes[cls])

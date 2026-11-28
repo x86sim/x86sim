@@ -58,6 +58,13 @@ Options:
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
   --xcodebuild ACTION     end as xcodebuild ACTION (test / test-without-building) does: its closing lines (the
                           result bundle, "Failing tests:" as it names them, ** TEST [EXECUTE ]SUCCEEDED / FAILED **)
+  --test-iterations N     run each test N times (xcodebuild -test-iterations; with the two below, their maximum)
+  --retry-tests-on-failure
+                          run a failed test again, up to 3 times (or --test-iterations): it passes when a run passes
+  --run-tests-until-failure
+                          run each test until it fails, up to 100 times (or --test-iterations)
+  --test-timeouts-enabled YES|NO, --default-test-execution-time-allowance S, --maximum-test-execution-time-allowance S
+                          XCTest's per-test time limits (xcodebuild's options of those names)
   --built                 the products were built for this run (xcodebuild test, not test-without-building): the
                           result bundle's build action succeeded instead of "not requested"
   --build-log FILE        the same, with the build's log and issues (the xcodebuild stand-in's build-log.json); a
@@ -225,14 +232,33 @@ X86SIM_LINE = re.compile(r"^(simshim: |arm64host: |a64: |DYLD_SHARED_REGION=avoi
 LIFETIMES = {"keepAlways": 0, "deleteOnSuccess": 1, "keepNever": 2}
 
 
+# XCTRepetitionMode as Xcode 27.2 sets it (XCTestConfiguration.repetitionPolicy), and its name in a result bundle
+REPETITION = {"until": (1, 100, "RunUntilFailure"), "retry": (2, 3, "RunRetryOnFailure"), "fixed": (3, 1, "FixedIterations")}
+
+
+def repetition(a):
+    """(XCTRepetitionMode, XCTMaximumIterations, result bundle name) of x86sim test's options, None for one run each"""
+    kind = "until" if a.get("until_failure") else "retry" if a.get("retry") else "fixed" if a.get("iterations") else None
+    if not kind:
+        return None
+    mode, default, name = REPETITION[kind]
+    return mode, a.get("iterations") or default, name
+
+
+def repetition_mode(a):
+    r = repetition(a)
+    return r[2] if r else None
+
+
 def configuration(bundle, module, target_path=None, target_bid=None, target_args=(), target_env=None, ui=False,
-                  only=None, skip=(), interop=2, t=None, scheme=None):
+                  only=None, skip=(), interop=2, t=None, scheme=None, opts=None):
     """The XCTestConfiguration Xcode 27.2 hands a test process in `xcodebuild test-without-building` (read on the Mac
     from XCTestConfiguration.activeTestConfiguration), less what only its IDE session has (reportResultsToIDE,
     sessionIdentifier, IDECapabilities, testApplicationDependencies). t: the .xctestrun target (attachment
     lifetimes); scheme: Runner.scheme_info() (the project's name and the scheme's products: crash report emphasis,
     symbolication, the apps' bundle infos), None for none."""
-    t, scheme = t or {}, scheme or {}
+    t, scheme, opts = t or {}, scheme or {}, opts or {}
+    rep = repetition(opts)
     to_run = identifier_set(only) if only else None
     sel = Obj(["XCTTestSelection", "NSObject"], {
         "IdentifiersToRun": to_run, "IdentifiersToSkip": identifier_set(skip, skip=True),
@@ -250,18 +276,22 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "baseTestsURL": URL("test://com.apple.xcode/%s/%s" % (url_part(scheme["project"]), url_part(module)))
         if scheme.get("project") else None,
         "baselineFileRelativePath": None, "baselineFileURL": None,
-        "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"), "defaultTestExecutionTimeAllowance": Num(600),
+        "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"),
+        "defaultTestExecutionTimeAllowance": Num(opts.get("default_allowance") or 600),
         "deferSymbolicationToHarness": False, "disablePerformanceMetrics": False, "emitOSLogs": False, "formatVersion": 2,
         "gatherLocalizableStringsData": False,
         "hangDetectionPolicy": Obj(["XCTHangDetectionPolicy", "NSObject"],
                                    {"detectionEnabled": False, "durationThreshold": 1.0, "severity": 0}),
         "inProcessParallelizationEnabled": True, "initializeForMultiDevice": False, "initializeForUITesting": ui,
-        "leaksCheckingMode": 0, "maximumTestExecutionTimeAllowance": None, "multiDevicePlatformVersionMap": None,
+        "leaksCheckingMode": 0,
+        "maximumTestExecutionTimeAllowance": Num(opts["max_allowance"]) if opts.get("max_allowance") else None,
+        "multiDevicePlatformVersionMap": None,
         "multiDeviceRemoteRunnerPlatformMap": None, "multiDeviceRequirementsFilePath": None,
         "performanceTestConfiguration": None, "preferredScreenCaptureFormat": 1, "productModuleName": module,
         "randomExecutionOrderingSeed": None,
         "repetitionPolicy": Obj(["XCTRepetitionPolicy", "NSObject"],
-                                {"XCTMaximumIterations": 1, "XCTRepeatInNewRunnerProcess": False, "XCTRepetitionMode": 0}),
+                                {"XCTMaximumIterations": rep[1] if rep else 1, "XCTRepeatInNewRunnerProcess": False,
+                                 "XCTRepetitionMode": rep[0] if rep else 0}),
         # no IDE session: XCTest reports to its log only (reportResultsToIDE / sessionIdentifier unset)
         "reportActivities": True, "reportResultsToIDE": False, "resultChannelConfiguration": None,
         "runAsMultiDeviceRemoteRunner": False,
@@ -279,7 +309,7 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "testApplicationUserOverrides": None,
         "testBundleRelativePath": rel_bundle(bundle), "testBundleURL": URL(bundle.rstrip("/") + "/"),
         "testExecutionOrdering": 0, "testIdentifiersToRun": to_run, "testInstructionsSet": None,
-        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": False,
+        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": bool(opts.get("timeouts")),
         "testsDrivenByIDE": False, "testsMustRunOnMainThread": ui, "traceCollectionEnabled_v2": None,
         "treatMissingBaselinesAsFailures": False,
         "userAttachmentLifetime": LIFETIMES.get(t.get("UserAttachmentLifetime"), 1),
@@ -733,7 +763,7 @@ def selection(t, only, skip, names):
 # ---------------------------------------------------------------------------------------------------------------------
 # XCTest's log -> results
 
-R_CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started\.")
+R_CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started(?: \(Iteration (\d+) of (\d+)\))?\.")
 R_CASE_END = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped) \((\d+(?:\.\d+)?) seconds\)\.")
 R_FAIL = re.compile(r"^(.*?):(\d+): error: -\[(\S+) (\S+)\] : (.*)$")
 R_SKIP = re.compile(r"^(.*?):(\d+): -\[(\S+) (\S+)\] : Test skipped(?: - (.*))?$")
@@ -1276,6 +1306,8 @@ class Parser:
         m = R_CASE_START.match(l)
         if m:
             self.current = self.test(m.group(1), m.group(2))
+            if m.group(3):   # a repetition (-test-iterations, -retry-tests-on-failure, -run-tests-until-failure)
+                self.iteration(self.current, int(m.group(3)), int(m.group(4)))
             self.last_fail = None
             if self.on_start:
                 self.on_start(self.current)
@@ -1460,6 +1492,46 @@ class Parser:
         for t in self.tests:
             if t.pop("_xfail_hook", None) and t["result"] == "passed" and t["expected_failures"]:
                 t["result"] = "expected_failure"
+
+    PER_RUN = ("result", "duration", "failures", "expected_failures", "skip_message")
+
+    def iteration(self, t, k, total):
+        """Iteration k of a repeated test starts: the one before it is kept in t["iterations"] (each {"iteration",
+        "result", "duration", "failures", ...}); t's own fields are the current run's until close()."""
+        if k > 1:
+            t.setdefault("iterations", []).append(self.run_of(t, k - 1))
+            for f in self.PER_RUN:
+                t.pop(f, None)
+            t["result"], t["failures"] = "running", []
+        t["_iteration"], t["_total"] = k, total
+
+    def run_of(self, t, k):
+        r = {"iteration": k}
+        r.update({f: t[f] for f in self.PER_RUN if f in t})
+        r["failures"] = list(r.get("failures") or [])
+        return r
+
+    def close(self, mode=None):
+        """The run's end: each repeated test's last run joins its "iterations", and the test takes Xcode's verdict
+        (retry on failure: its last run's; otherwise failed when any run failed) and all the runs' issues."""
+        for t in self.tests:
+            k = t.pop("_iteration", None)
+            total = t.pop("_total", None)
+            if k is None:
+                continue
+            runs = t.get("iterations", []) + [self.run_of(t, k)]
+            t["iterations"] = runs
+            t["repetition"] = {"mode": mode, "total": total}
+            results = [r.get("result") for r in runs]
+            if mode == "RunRetryOnFailure":
+                t["result"] = results[-1]
+            elif "failed" in results:
+                t["result"] = "failed"
+            t["duration"] = round(sum(float(r.get("duration") or 0) for r in runs), 6)
+            t["failures"] = [f for r in runs for f in r.get("failures") or []]
+            xf = [f for r in runs for f in r.get("expected_failures") or []]
+            if xf:
+                t["expected_failures"] = xf
 
     def finish(self, why=None):
         """The process ended (or was stopped): a test still running failed with `why`."""
@@ -1732,7 +1804,7 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
-                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme)
+                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme, opts=self.a)
                 env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
                 env["XCTestBundlePath"] = bundle
                 # the test process, as Xcode's action log names it (runnable: what Xcode launched)
@@ -1780,10 +1852,10 @@ class Runner:
                     cfg = configuration(bundle, module, target_path=tpath, target_bid=tbid,
                                         target_args=[self.subst(x, host) for x in t.get("UITargetAppCommandLineArguments", [])],
                                         target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop, t=t,
-                                        scheme=self.scheme)
+                                        scheme=self.scheme, opts=self.a)
                 else:
                     cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t,
-                                        scheme=self.scheme)
+                                        scheme=self.scheme, opts=self.a)
                 env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
@@ -1838,6 +1910,7 @@ class Runner:
             res["error"] = str(e)
         except SystemExit as e:   # simctl's die(): no answer from the phone
             res["error"] = "the device did not answer (%s)" % e
+        parser.close(repetition_mode(self.a))
         res["tests"] = parser.tests
         # XCTest's debug log (libsimshim: Xcode's session log, which XCTest otherwise prints among the output)
         appout = os.path.join(att, "app-output")
@@ -1949,9 +2022,15 @@ class Runner:
                 continue
             cls, tn = m.group(1).split(".")[-1], m.group(2)
             t = next((x for x in tests if not x.get("swift_testing") and x["name"] == tn
-                      and x["class"].split(".")[-1] == cls and "started" not in x), None)
-            if t is not None:
+                      and x["class"].split(".")[-1] == cls), None)
+            if t is None:
+                continue
+            if "started" not in t:
                 t["started"] = round(e["start"], 6)
+            # a repeated test: each run's start, in order
+            run = next((r for r in t.get("iterations") or [] if "started" not in r), None)
+            if run is not None:
+                run["started"] = round(e["start"], 6)
 
     @staticmethod
     def activities(raw, tests):
@@ -2294,7 +2373,9 @@ def parse(argv):
     a = {"xctestrun": None, "products": None, "app": None, "bundles": [], "runner": None, "spm": None, "only": [],
          "skip": [], "targets": [], "platform": None, "out": None, "json": None, "junit": None, "timeout": 1800.0,
          "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
-         "built": False, "build_log": None, "xcodebuild": None}
+         "built": False, "build_log": None, "xcodebuild": None,
+         "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
+         "max_allowance": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2330,6 +2411,18 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--test-iterations":
+            a["iterations"] = int(val())
+        elif k == "--retry-tests-on-failure":
+            a["retry"] = True
+        elif k == "--run-tests-until-failure":
+            a["until_failure"] = True
+        elif k == "--test-timeouts-enabled":
+            a["timeouts"] = val().upper() in ("YES", "1", "TRUE")
+        elif k == "--default-test-execution-time-allowance":
+            a["default_allowance"] = int(float(val()))
+        elif k == "--maximum-test-execution-time-allowance":
+            a["max_allowance"] = int(float(val()))
         elif k == "--xcodebuild":
             a["xcodebuild"] = val()
             if a["xcodebuild"] not in ("test", "test-without-building"):

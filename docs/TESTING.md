@@ -55,6 +55,12 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   as Xcode does (`PreferredScreenCaptureFormat` screenRecording, its default): a failed test keeps its
   `Screen_Recording.mp4` (`SystemAttachmentLifetime` deleteOnSuccess; keepAlways keeps all), `--no-screen-recording`
   turns it off.
+- **Repetitions and time limits** (`--test-iterations N`, `--retry-tests-on-failure`, `--run-tests-until-failure`,
+  `--test-timeouts-enabled YES`, `--default-test-execution-time-allowance S`, `--maximum-test-execution-time-allowance
+  S`; the `xcodebuild` stand-in passes its options of those names): XCTest repeats the tests in the test process as
+  Xcode 27.2 asks it to (the same repetition policy and limits in its configuration). Each run is kept
+  (`iterations` in `results.json`, "Repetition N" / "First Run", "Retry N" in a result bundle), and the test's result
+  is Xcode's: with retries its last run's, otherwise failed when any run failed.
 - **Code coverage** (`--coverage`, MCP `xctest_run coverage: true`, `xcodebuild -enableCodeCoverage YES` or a scheme
   with "Gather coverage"): each test process and the app a UI test drives write LLVM profiles (`LLVM_PROFILE_FILE`, as
   Xcode sets it), merged into `coverage/Coverage.profdata` and reported per product and file as `xccov view --report`
@@ -141,6 +147,8 @@ What still differs from Xcode 27.2 on a Mac, measured with the fixtures above (n
   (Xcode's, as Swift Testing runs tests in parallel, is often another test's). How often a UI test's "Waiting …" activity re-checks before it times out
   depends on timing, so a slow host can record a different count than Apple's.
 - **Selection**: a bare `-only-testing Class` (no target) selects that class in every target; Xcode refuses it.
+- **Repetitions in a new process** (`-test-repetition-relaunch-enabled YES`) run in the same test process: the
+  relaunch is Xcode's, between runs, which `x86sim test` does not do.
 - **Swift packages**: SwiftPM builds one `<Package>PackageTests` bundle; `x86sim test --spm` relinks it once per test
   target (as Xcode's bundles are). If that relink fails it runs the one bundle and says so; Swift Testing selections
   and skips then match no test target (XCTest ones still work).

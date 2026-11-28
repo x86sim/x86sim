@@ -664,5 +664,36 @@ class StructuredValues(unittest.TestCase):
                          (None, ["key", "value"], None))
 
 
+class Repetitions(unittest.TestCase):
+    # xcodebuild -retry-tests-on-failure / -test-iterations 3 on Xcode 27.2: XCTest's lines, Apple's verdicts
+    LOG = """Test Case '-[L.FlakyTests testFlaky]' started (Iteration 1 of 3).
+/s/L.swift:29: error: -[L.FlakyTests testFlaky] : XCTAssertGreaterThan failed - fails on its first run
+Test Case '-[L.FlakyTests testFlaky]' failed (1.000 seconds).
+Test Case '-[L.FlakyTests testFlaky]' started (Iteration 2 of 3).
+Test Case '-[L.FlakyTests testFlaky]' passed (0.001 seconds).
+Test Case '-[L.LogicTests testSort]' started (Iteration 1 of 3).
+Test Case '-[L.LogicTests testSort]' passed (0.001 seconds).
+"""
+
+    def runs(self, mode):
+        p = X.Parser("L")
+        for ln in self.LOG.splitlines():
+            p.line(ln)
+        p.close(mode)
+        return {t["name"]: t for t in p.tests}
+
+    def test_row19_retry_and_iterations(self):
+        t = self.runs("RunRetryOnFailure")
+        self.assertEqual([(r["iteration"], r["result"], len(r["failures"])) for r in t["testFlaky"]["iterations"]],
+                         [(1, "failed", 1), (2, "passed", 0)])
+        self.assertEqual((t["testFlaky"]["result"], t["testFlaky"]["repetition"]), ("passed", {"mode": "RunRetryOnFailure", "total": 3}))
+        self.assertEqual(t["testSort"]["result"], "passed")
+        self.assertEqual(self.runs("FixedIterations")["testFlaky"]["result"], "failed")   # any run failed
+        cfg = X.configuration("/b/T.xctest", "M", opts={"retry": True})
+        self.assertIn(b"XCTRepetitionMode", cfg)
+        self.assertEqual(X.repetition({"until_failure": True, "iterations": 5}), (1, 5, "RunUntilFailure"))
+        self.assertEqual(X.repetition({"iterations": 2}), (3, 2, "FixedIterations"))
+
+
 if __name__ == "__main__":
     unittest.main()
