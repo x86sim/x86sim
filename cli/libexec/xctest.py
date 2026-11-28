@@ -61,6 +61,11 @@ Options:
   --also-on PHONE         run the same tests on another device too (repeatable: xcodebuild test with several
                           -destination); the devices test at the same time, as xcodebuild's destinations; one result
                           bundle with an action per device
+  --record-baselines      set the performance tests' baselines from this run (Xcode's "Set Baseline"): each
+                          metric's average into the project's xcshareddata/xcbaselines, for this machine and device
+                          (the next build copies them into the test bundle; later runs compare with them)
+  --baselines-project P.xcodeproj
+                          the project for --record-baselines (default: the .xctestrun's source root and container)
   --parallel-testing[=YES|NO], --parallel-workers N
                           split each target's classes over N worker processes (xcodebuild -parallel-testing-enabled,
                           -parallel-testing-worker-count; default 2; the .xctestrun's ParallelizationEnabled turns it
@@ -251,6 +256,107 @@ LIFETIMES = {"keepAlways": 0, "deleteOnSuccess": 1, "keepNever": 2}
 REPETITION = {"until": (1, 100, "RunUntilFailure"), "retry": (2, 3, "RunRetryOnFailure"), "fixed": (3, 1, "FixedIterations")}
 
 
+# ---- performance baselines (Xcode's xcbaselines: Swift Build copies <project>/xcshareddata/xcbaselines/<target>.xcbaseline
+# into the test bundle as xcbaselines/; a run destination is a machine and a device; Xcode matches them exactly)
+
+def host_record():
+    """This machine as a baseline's localComputer (Xcode's keys; Linux's facts: /proc/cpuinfo, the DMI product)"""
+    kind, cores, packages, physical = "", os.cpu_count() or 1, set(), None
+    try:
+        for ln in open("/proc/cpuinfo"):
+            k, _, v = ln.partition(":")
+            k, v = k.strip(), v.strip()
+            if k == "model name" and not kind:
+                kind = v
+            elif k == "physical id":
+                packages.add(v)
+            elif k == "cpu cores" and physical is None:
+                physical = int(v) if v.isdigit() else None
+    except OSError:
+        pass
+    try:
+        model = open("/sys/devices/virtual/dmi/id/product_name").read().strip()
+    except OSError:
+        model = ""
+    n = max(1, len(packages))
+    return {"busSpeedInMHz": 0, "cpuCount": n, "cpuKind": kind or platform_machine(), "cpuSpeedInMHz": 0,
+            "logicalCPUCoresPerPackage": cores // n, "modelCode": model or "Linux",
+            "physicalCPUCoresPerPackage": physical or cores // n, "platformIdentifier": "com.x86sim.platform.linux"}
+
+
+def platform_machine():
+    import platform
+    return platform.machine()
+
+
+def baseline_destination(device_code, platform_id):
+    return {"localComputer": host_record(), "targetArchitecture": "arm64",
+            "targetDevice": {"modelCode": device_code, "platformIdentifier": platform_id}}
+
+
+def baseline_for(bundle, device_code, platform_id):
+    """(relative path, the destination's UUID) of the bundle's baseline for this machine and device, None without one"""
+    try:
+        with open(os.path.join(bundle, "xcbaselines", "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    want = baseline_destination(device_code, platform_id)
+    for u, d in (info.get("runDestinationsByUUID") or {}).items():
+        if d == want and os.path.isfile(os.path.join(bundle, "xcbaselines", u + ".plist")):
+            return "xcbaselines/%s.plist" % u
+    return None
+
+
+def record_baselines(project, target, tests, device_code, platform_id):
+    """Xcode's "Set Baseline" for a target's performance tests: each metric's average into
+    <project>/xcshareddata/xcbaselines/<target GUID>.xcbaseline, for this machine and device. Returns the folder."""
+    try:
+        pbx = open(os.path.join(project, "project.pbxproj"), errors="replace").read()
+    except OSError:
+        return None
+    guid = None   # the target's id: its PBXNativeTarget block names it
+    for m in re.finditer(r"([0-9A-Fa-f]{24}) (?:/\*[^*]*\*/ )?= \{\s*isa = PBXNativeTarget;(.*?)\n\s*\};", pbx, re.S):
+        if re.search(r'\bname = "?%s"?;' % re.escape(target), m.group(2)):
+            guid = m.group(1)
+            break
+    if not guid:
+        return None
+    d = os.path.join(project, "xcshareddata", "xcbaselines", guid + ".xcbaseline")
+    os.makedirs(d, exist_ok=True)
+    try:
+        with open(os.path.join(d, "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        info = {}
+    dests = info.setdefault("runDestinationsByUUID", {})
+    want = baseline_destination(device_code, platform_id)
+    u = next((k for k, v in dests.items() if v == want), None)
+    if u is None:
+        u = str(uuid.uuid5(uuid.NAMESPACE_URL, "x86sim-baseline:" + json.dumps(want, sort_keys=True))).upper()
+        dests[u] = want
+    with open(os.path.join(d, "Info.plist"), "wb") as f:
+        plistlib.dump(info, f)
+    bp = os.path.join(d, u + ".plist")
+    try:
+        with open(bp, "rb") as f:
+            base = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        base = {}
+    classes = base.setdefault("classNames", {})
+    for t in tests:
+        for mt in t.get("metrics") or []:
+            vals = [float(v) for v in mt.get("values") or []]
+            if not vals:
+                continue
+            name = t["name"] if t["name"].endswith(")") else t["name"] + "()"
+            classes.setdefault(t["class"].split(".")[-1], {}).setdefault(name, {})[mt["id"]] = {
+                "baselineAverage": round(sum(vals) / len(vals), 6), "baselineIntegrationDisplayName": "Local Baseline"}
+    with open(bp, "wb") as f:
+        plistlib.dump(base, f)
+    return d
+
+
 def repetition(a):
     """(XCTRepetitionMode, XCTMaximumIterations, result bundle name) of x86sim test's options, None for one run each"""
     kind = "until" if a.get("until_failure") else "retry" if a.get("retry") else "fixed" if a.get("iterations") else None
@@ -266,7 +372,7 @@ def repetition_mode(a):
 
 
 def configuration(bundle, module, target_path=None, target_bid=None, target_args=(), target_env=None, ui=False,
-                  only=None, skip=(), interop=2, t=None, scheme=None, opts=None):
+                  only=None, skip=(), interop=2, t=None, scheme=None, opts=None, baseline=None):
     """The XCTestConfiguration Xcode 27.2 hands a test process in `xcodebuild test-without-building` (read on the Mac
     from XCTestConfiguration.activeTestConfiguration), less what only its IDE session has (reportResultsToIDE,
     sessionIdentifier, IDECapabilities, testApplicationDependencies). t: the .xctestrun target (attachment
@@ -290,7 +396,10 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "automationFrameworkPath": scheme.get("automation"),
         "baseTestsURL": URL("test://com.apple.xcode/%s/%s" % (url_part(scheme["project"]), url_part(module)))
         if scheme.get("project") else None,
-        "baselineFileRelativePath": None, "baselineFileURL": None,
+        # a performance baseline for this machine and device (baseline_for(): the bundle's xcbaselines), as Xcode's
+        # harness hands it to XCTest
+        "baselineFileRelativePath": baseline[0] if baseline else None,
+        "baselineFileURL": URL(baseline[1]) if baseline else None,
         "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"),
         "defaultTestExecutionTimeAllowance":
             Num(opts.get("default_allowance") or t.get("DefaultTestExecutionTimeAllowance") or 600),
@@ -1619,6 +1728,17 @@ class Runner:
         self.install_times[app] = (t0, time.time())
         return bid, path
 
+    def device_ids(self):
+        """(model code, platform identifier) of the device, as a baseline's targetDevice names it"""
+        import xcresult
+        di = xcresult.device_info({"platform": self.plat, "device": self.dev, "runtime": self.rt, "phone": self.phone})
+        return di["code"] or di["model"], di["platform"]
+
+    def baseline(self, bundle):
+        """(baselineFileRelativePath, baselineFileURL) of the test bundle's baseline for this machine and device"""
+        rel = baseline_for(undv(bundle), *self.device_ids())
+        return (rel, bundle.rstrip("/") + "/" + rel) if rel else None
+
     def scheme_info(self, targets):
         """What Xcode puts in every test process's XCTestConfiguration about the scheme (configuration()): the project's
         name (baseTestsURL), its products (DependentProductPaths of the .xctestrun, else each target's bundle and apps)
@@ -1965,7 +2085,8 @@ class Runner:
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
                 env.update(extra_env or {})
-                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme, opts=self.a)
+                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme,
+                                    opts=self.a, baseline=self.baseline(bundle))
                 env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
                 # the test process, as Xcode's action log names it (runnable: what Xcode launched)
@@ -2014,10 +2135,10 @@ class Runner:
                     cfg = configuration(bundle, module, target_path=tpath, target_bid=tbid,
                                         target_args=[self.subst(x, host) for x in t.get("UITargetAppCommandLineArguments", [])],
                                         target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop, t=t,
-                                        scheme=self.scheme, opts=self.a)
+                                        scheme=self.scheme, opts=self.a, baseline=self.baseline(bundle))
                 else:
                     cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t,
-                                        scheme=self.scheme, opts=self.a)
+                                        scheme=self.scheme, opts=self.a, baseline=self.baseline(bundle))
                 env["XCTestConfigurationFilePath"] = self.write_config(stem, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
@@ -2591,7 +2712,7 @@ def parse(argv):
          "iterations": None, "retry": False, "until_failure": False, "timeouts": None, "default_allowance": None,
          "max_allowance": None, "only_config": [], "skip_config": [], "more_phones": [], "multi": False, "relaunch": False,
          "multi_child": False, "serial_destinations": False, "max_destinations": None, "parallel": None,
-         "parallel_workers": None}
+         "parallel_workers": None, "record_baselines": False, "baselines_project": None}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2627,6 +2748,10 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--record-baselines":
+            a["record_baselines"] = True
+        elif k == "--baselines-project":
+            a["baselines_project"] = val()
         elif k == "--parallel-testing":
             a["parallel"] = val().upper() in ("YES", "1", "TRUE") if "=" in x else True
         elif k == "--parallel-workers":
@@ -2850,6 +2975,34 @@ def concurrent_destinations(argv, a, phones):
     return 0 if ok else 1
 
 
+def record_run_baselines(a, run, s):
+    """--record-baselines: the run's performance metrics as the project's baselines (record_baselines())"""
+    proj = a.get("baselines_project")
+    if not proj and a.get("xctestrun"):
+        try:
+            with open(a["xctestrun"], "rb") as f:
+                d = plistlib.load(f)
+            md = d.get("__xctestrun_metadata__") or {}
+            ci = md.get("ContainerInfo") or d.get("ContainerInfo") or {}
+            if md.get("SweetPadSourceRoot") and ci.get("ContainerName"):
+                proj = os.path.join(md["SweetPadSourceRoot"], ci["ContainerName"] + ".xcodeproj")
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            pass
+    if not proj or not os.path.isdir(proj):
+        print("x86sim test: --record-baselines needs the project (--baselines-project P.xcodeproj)", file=sys.stderr)
+        return
+    code, pid = run.device_ids()
+    for t in s["targets"]:
+        if any(x.get("metrics") for x in t["tests"]):
+            d = record_baselines(proj, t["name"], t["tests"], code, pid)
+            if d:
+                s.setdefault("baselines", []).append(d)
+                if not a["quiet"]:
+                    print("x86sim test: %s: baselines set in %s (rebuild to use them)" % (t["name"], d), file=sys.stderr)
+            else:
+                print("x86sim test: %s: no target of that name in %s" % (t["name"], proj), file=sys.stderr)
+
+
 def device_path(name):
     """a device by name (as x86sim names them: var/device-a64-<name>), folder or path"""
     for c in (name, os.path.join(ROOT, "var", name), os.path.join(ROOT, "var", "device-a64-" + name)):
@@ -2879,6 +3032,8 @@ def run_on_device(a, blog):
         s["build_log"], s["build_issues"] = blog.get("log"), blog.get("issues") or []
     if a.get("spm_project"):   # the package: the .xcresult's project and scheme, as Xcode names them
         s.setdefault("project", a["spm_project"])
+    if a["record_baselines"]:
+        record_run_baselines(a, run, s)
     with open(os.path.join(run.out, "results.json"), "w") as f:
         json.dump(s, f, indent=1)
     x = junit(s)

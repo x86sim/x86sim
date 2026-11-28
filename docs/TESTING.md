@@ -72,8 +72,12 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
 - **Performance tests** (`measure {}`, `measure(metrics:)`): each metric XCTest measured (`libsimshim` takes them
   where Xcode's IDE session would) is kept with the test (`metrics` in `results.json`: identifier, name, units,
   values, baseline, limits, polarity) and in a result bundle as Xcode keeps it (`xcresulttool get test-results
-  metrics`, `hasPerformanceMetrics`; equal to Xcode 27.2's but for the measured values). Baselines are not kept:
-  Xcode stores them in the project's `xcbaselines`, which a run here does not write.
+  metrics`, `hasPerformanceMetrics`; equal to Xcode 27.2's but for the measured values). Baselines work as Xcode's:
+  Swift Build copies the project's `xcshareddata/xcbaselines` into the test bundle, and `x86sim test` hands XCTest
+  the one for this machine and device (`baselineFileRelativePath` / `baselineFileURL`, as Xcode's harness), which
+  then compares and fails a regression. `--record-baselines` is Xcode's "Set Baseline": each metric's average
+  into the project's `xcbaselines`, for this machine (its CPU and board, as Xcode's `localComputer`) and the
+  device; a baseline recorded on a Mac names that Mac, so it is not this machine's, as in Xcode.
 - **Test plans**: a scheme's test plan (`.xctestplan`) gives an `.xctestrun` with one set of targets per
   configuration (Swift Build writes it in `build-for-testing`: each configuration's environment, arguments,
   language and region, skipped and selected tests, time limits); `x86sim test` runs every configuration in turn
