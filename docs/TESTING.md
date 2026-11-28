@@ -79,7 +79,9 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   `<derived data>/Logs/Test/Test-<Scheme>-<time>.xcresult`), prints what `xcodebuild` prints (its "Command line
   invocation:", the test processes' output, "Test session results, code coverage, and logs:", "Failing tests:" as
   Xcode names them, `** TEST [EXECUTE ]SUCCEEDED / FAILED **`, which CI log parsers read; `x86sim test
-  --xcodebuild ACTION` does the same) and puts `x86sim test`'s own output next to the bundle
+  --xcodebuild ACTION` does the same; a build, in `build`, `build-for-testing` and `test`, prints Xcode's log of it,
+  task by task, with the compiler's diagnostics as Swift prints them, and a failed test build ends with Xcode's
+  "Testing failed:" and "The following build commands failed:") and puts `x86sim test`'s own output next to the bundle
   (`<bundle>.x86sim/`). Its `test` also puts the build in it, as Xcode does: the build log (`xcresulttool get log
   --type build`: one section per Swift Build task that ran, with Xcode's titles, commands and times, read from the
   build's `XCBuildData`), its errors and warnings (`get build-results`, with the issue types of the compilers'
