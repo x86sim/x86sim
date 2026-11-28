@@ -638,11 +638,22 @@ static void fatal_exit(int code) {
     syscall(SYS_kill, getpid(), SIGKILL);
     syscall(SYS_exit_group, 128 + code);
 }
+// Darling starts the container's processes with a soft core limit of 0, as macOS does (the hard limit stays the
+// server's): a guest reading getrlimit sees macOS's value. A crash that is meant to dump (libarm64jit / dynarmic's own
+// faults and aborts, X86SIM_A64_GUEST_CORE=1) raises the soft limit to the hard one first.
+static void allow_core() {
+    struct rlimit r;
+    if (getrlimit(RLIMIT_CORE, &r) == 0 && r.rlim_cur < r.rlim_max) {
+        r.rlim_cur = r.rlim_max;
+        setrlimit(RLIMIT_CORE, &r);
+    }
+}
 // A guest crash without a guest handler ends as on XNU: killed by that signal (the parent's wait status, RunningBoard's
 // crash reason), after libarm64jit's report.
 void die_with_signal(int sig, bool core) {
     dbg_exiting(sig);
     if (!core) prctl(PR_SET_DUMPABLE, 0);
+    else allow_core();
     struct sigaction sa{};
     sa.sa_handler = SIG_DFL;
     sigaction(sig, &sa, nullptr);
@@ -826,7 +837,7 @@ static void on_fault(int sig, siginfo_t *si, void *uc) {
     struct sigaction *old = sig == SIGSEGV ? &g_old_segv : &g_old_bus;
     if (old->sa_flags & SA_SIGINFO) old->sa_sigaction(sig, si, uc);
     else if (old->sa_handler != SIG_DFL && old->sa_handler != SIG_IGN) old->sa_handler(sig);
-    else { signal(sig, SIG_DFL); raise(sig); }
+    else { allow_core(); signal(sig, SIG_DFL); raise(sig); }
 }
 // SIGABRT from native code (Darling's libsystem, dynarmic asserts): native and guest backtraces, then the default.
 static const char *g_scratch_abrt = "";  // scratch_dir(), resolved before the handler is installed
@@ -897,12 +908,12 @@ static void on_abrt(int sig, siginfo_t *si, void *uc) {
     // translated process. systemd-coredump wrote ~700 MB per app crash and took ~7 s, so the app outlived
     // app_launch's 3 s watch and its crash read as a good launch. X86SIM_A64_GUEST_CORE=1 keeps such cores; our own
     // aborts (libarm64jit, dynarmic: ELF code) always dump.
-    if (GuestThread::current() && !in_elf_code(rip)) {
-        const char *gc = getenv("X86SIM_A64_GUEST_CORE");
-        if (!gc || atoi(gc) != 1) {
-            struct rlimit nocore = {0, 0};
-            setrlimit(RLIMIT_CORE, &nocore);
-        }
+    const char *gc = getenv("X86SIM_A64_GUEST_CORE");
+    if (GuestThread::current() && !in_elf_code(rip) && (!gc || atoi(gc) != 1)) {
+        struct rlimit nocore = {0, 0};
+        setrlimit(RLIMIT_CORE, &nocore);
+    } else {
+        allow_core();
     }
     signal(SIGABRT, SIG_DFL);
     raise(SIGABRT);
