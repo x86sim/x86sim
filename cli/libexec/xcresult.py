@@ -652,8 +652,9 @@ def expression(x):
 
 
 class Writer:
-    def __init__(self, summary, bundle, products_root):
+    def __init__(self, summary, bundle, products_root, final=None):
         self.s = summary
+        self.final = final or bundle   # where the bundle ends up (Xcode names its staging diagnostics by it)
         self.st = Store(bundle)
         info = xctestrun_info(summary, products_root)
         self.project = summary.get("project") or info.get("project") or guess_project(summary.get("targets") or [])
@@ -942,32 +943,100 @@ class Writer:
 
         return self.st.obj(section(log, True))
 
-    def log_section(self, target, start):
-        """The target's part of the action log: its process's output, as Xcode keeps it."""
+    @staticmethod
+    def output(target):
+        """A test process's output as Xcode keeps it: without the lines x86Sim's own pieces print (libsimshim,
+        the translator, dyld_sim's note on DYLD_SHARED_REGION)"""
         try:
             with open(target.get("log") or "", errors="replace") as f:
-                out = f.read()
+                return "".join(ln for ln in f if not X86SIM_LINE.match(ln))
         except OSError:
-            out = ""
-        res = "succeeded" if target.get("result") == "passed" else "failed"
+            return ""
+
+    def log_section(self, target, start):
+        """The target's part of the action log, as Xcode keeps it: "Test target T" > the test process ("XCTestDemo
+        (pid)", "xctest (pid)", "T-Runner (pid)": its runnable, its whole output, Xcode's tests-passed line) > "Run
+        test suite All tests" > ... > "Run test case t()", each with its own lines of the output, its summary line, a
+        test case's failures ("test failure") and skip ("test skipped") as messages (log_tree())."""
+        out = self.output(target)
+        # Xcode's sections say whether the process ran, not whether its tests passed
+        res = "failed" if target.get("error") else "succeeded"
         tests = target.get("tests") or []
-        passed = sum(1 for t in tests if t.get("result") == "passed")
+        suites = log_tree(out, tests, start)
+        top = next((n for n in suites if n["kind"] == "suite"), None)
+        swift = swift_log_tree(out, tests, start)
+        passed = top["passed_string"] if top else "%d test%s total, %d passed" % (
+            len(tests), "" if len(tests) == 1 else "s", sum(1 for t in tests if t.get("result") == "passed"))
+        if swift:
+            # Xcode counts the XCTest suite and Swift Testing's top-level suites (not free test functions)
+            counts = [top["counts"]] if top else []
+            counts += [n["counts"] for n in swift if n["kind"] == "suite"]
+            passed = passed_string(*[sum(c[i] for c in counts) for i in range(5)])
+        suites = suites + swift
+        dur = float(target.get("duration") or 0)
+        subs = [self.log_node(n, res) for n in suites]
+        if target.get("session_log"):
+            # Xcode: where it writes the session log (in the bundle's staging area, while it runs)
+            sess = "%s/Staging/1_Test/Diagnostics/%s/%s" % (self.final, target["name"], self.session_name(target))
+            subs.insert(0, O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection"),
+                             title=S("Writing diagnostic log for test runner launch."), startTime=T(start),
+                             duration=D(0.0), result=S("succeeded"), subsections=[], attachments=[],
+                             commandDetails=S(sess), emittedOutput=S(""), exitCode=I(0),
+                             messages=[O("ActivityLogMessage", type=S("notice"), title=S(sess), shortTitle=S(sess),
+                                         location=O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                                                    url=S("file://" + urllib.parse.quote(sess))), annotations=[])]))
         worker = O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection.Worker"),
-                   title=S("%s (%s)" % (target["name"], target.get("pid") or 0)), startTime=T(start),
-                   duration=D(target.get("duration") or 0), result=S(res), subsections=[], messages=[], attachments=[],
-                   emittedOutput=S(out), testsPassedString=S("%d test%s total, %d passed" % (len(tests), "" if len(tests) == 1 else "s", passed)),
-                   wasSkipped=B(False))
+                   title=S("%s (%s)" % (target.get("process") or target["name"], target.get("pid") or 0)),
+                   startTime=T(start), duration=D(dur), result=S(res),
+                   subsections=subs, messages=[], attachments=[],
+                   emittedOutput=S(out), testsPassedString=S(passed), wasSkipped=B(False),
+                   runnablePath=S(target.get("runnable")),
+                   runnableUTI=S(("com.apple.application-bundle" if (target.get("runnable") or "").endswith(".app")
+                                  else "public.unix-executable") if target.get("runnable") else None))
         return O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.unit.cocoaUnitTest"),
-                 title=S("Test target %s" % target["name"]), startTime=T(start), duration=D(target.get("duration") or 0),
+                 title=S("Test target %s" % target["name"]), startTime=T(start), duration=D(dur),
                  result=S(res), subsections=[worker], messages=[], attachments=[], wasSkipped=B(False))
 
+    def log_node(self, n, res):
+        msgs = []
+        for m in n.get("messages") or []:
+            loc = None
+            if m.get("file"):
+                ln = max(0, int(m.get("line") or 1) - 1)
+                loc = O("DocumentLocation", concreteTypeName=S("DVTTextDocumentLocation"),
+                        url=S("file://%s#EndingLineNumber=%d&StartingLineNumber=%d" % (urllib.parse.quote(m["file"]), ln, ln)))
+            msgs.append(O("ActivityLogMessage", type=S(m["type"]), title=S(m["title"]), shortTitle=S(m["title"]),
+                          location=loc, annotations=[]))
+        f = dict(domainType=S("com.apple.dt.IDE.UnitTestLogSection"), title=S(n["title"]), startTime=T(n["start"]),
+                 duration=D(n["duration"]), result=S(res), subsections=[self.log_node(c, res) for c in n["children"]],
+                 messages=msgs, attachments=[], emittedOutput=S(n["output"]), summary=S(n["summary"]),
+                 suiteName=S(n["suite"]), wasSkipped=B(n.get("skipped", False)))
+        if n["kind"] == "suite":
+            f["testsPassedString"] = S(n["passed_string"])
+        else:
+            f["testName"] = S(n["test"])
+        return O("ActivityLogUnitTestSection", **f)
+
+    @staticmethod
+    def session_name(target):
+        """Xcode's name for a target's session log: Session-<Target>-<YYYY-MM-DD_HHMMSS>-<6 letters>.log"""
+        when = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(float(target.get("started") or 0) or time.time()))
+        tag = base64.b64encode(hashlib.sha256(("%s %s" % (target["name"], when)).encode()).digest()).decode()
+        return "Session-%s-%s-%s.log" % (target["name"], when, re.sub(r"[^A-Za-z0-9]", "x", tag)[:6])
+
     def diagnostics(self):
+        """Diagnostics/<Target>/: the test process's output (StandardOutputAndStandardError.txt) and XCTest's debug log
+        (the session log: x86sim test's <Target>.session.log, libsimshim's), as Xcode keeps them"""
         ents = []
         for t in self.s.get("targets") or []:
+            files = []
             if t.get("log") and os.path.isfile(t["log"]):
-                oid, _ = self.st.file(t["log"])
-                d = self.st.directory([("StandardOutputAndStandardError.txt", ("file", oid))])
-                ents.append((t["name"], ("dir", d)))
+                files.append(("StandardOutputAndStandardError.txt", ("file", self.st.put(self.output(t).encode()))))
+            if t.get("session_log") and os.path.isfile(t["session_log"]):
+                oid, _ = self.st.file(t["session_log"])
+                files.append((self.session_name(t), ("file", oid)))
+            if files:
+                ents.append((t["name"], ("dir", self.st.directory(files))))
         return self.st.directory(ents) if ents else None
 
     def write(self):
@@ -1077,6 +1146,192 @@ def build_issue(i):
              documentLocationInCreatingWorkspace=doc)
 
 
+X86SIM_LINE = re.compile(r"^(simshim: |arm64host: |a64: |DYLD_SHARED_REGION=avoid not supported for simulator$)")
+SUITE_START = re.compile(r"^Test Suite '(.+)' started at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\.?$")
+SUITE_END = re.compile(r"^Test Suite '(.+)' (passed|failed) at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\.?$")
+EXECUTED = re.compile(r"^\s+Executed (\d+) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures? \((\d+) unexpected\)")
+ISSUE_LINE = re.compile(r"^.*:\d+: (?:(?:error|warning): )?-\[")   # an issue or a skip, as XCTest prints them
+CASE_START = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' started\.$")
+CASE_END = re.compile(r"^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped) \((\d+\.\d+) seconds\)\.$")
+
+
+def log_time(ts):
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    except ValueError:
+        return None
+
+
+def passed_string(n, skipped, failures, unexpected, expected=0):
+    """Xcode's tests-passed line from XCTest's "Executed N tests, with S skipped and F failures (U unexpected)": the
+    passed count leaves out the skipped, failed and unexpected ones, failures are not named, an unexpected one (a
+    thrown error) is an "uncaught exception" """
+    out = "%d test%s total, %d passed" % (n, "" if n == 1 else "s", max(0, n - skipped - failures - unexpected - expected))
+    if skipped:
+        out += ", %d skipped" % skipped
+    if expected:   # tests with a known issue / XCTExpectFailure (Xcode counts them, failed or not)
+        out += ", %d expected failure%s" % (expected, "" if expected == 1 else "s")
+    if unexpected:
+        out += ", %d uncaught exception%s" % (unexpected, "" if unexpected == 1 else "s")
+    return out
+
+
+def swift_log_tree(text, tests, start):
+    """Swift Testing's suites and tests in Xcode's action log (beside XCTest's "All tests"): "Run test suite <Suite>"
+    (nested as the suite path; tests-passed line over its tests), "Run test case <name>" (one per argument of a
+    parameterized test; a test outside any suite at the top, without a suite name): its console lines (Swift
+    Testing's "◇ / ✔ / ✘ / ➜ Test name ..."), the last as its summary, its issues ("test failure") and skip ("test
+    skipped: Test skipped: <comment>"). Swift Testing runs tests in parallel, and Xcode's own summaries of them are
+    lines of other tests; these are the test's own."""
+    lines = text.splitlines(True)
+    suites, roots = {}, []
+
+    def suite(path):
+        if path in suites:
+            return suites[path]
+        n = {"kind": "suite", "title": "Run test suite " + path[-1], "suite": path[-1], "test": None, "start": start,
+             "duration": 0.0, "output": "", "summary": "", "passed_string": "", "messages": [], "children": [],
+             "counts": [0, 0, 0, 0, 0], "skipped": False}
+        suites[path] = n
+        (suite(path[:-1])["children"] if len(path) > 1 else roots).append(n)
+        return n
+
+    for t in tests:
+        if not t.get("swift_testing"):
+            continue
+        name = t.get("name") or ""
+        mine = [ln for ln in lines if re.search(r"(Test|Suite) %s( |$)" % re.escape(name), ln)
+                and re.match(r"^[◇✔✘➜↳━􀟈􁁛􀢄􀙟􀄵]", ln.lstrip())]
+        path = tuple(t.get("suite") or ())
+        for a in t.get("arguments") or [None]:
+            r = (a or t).get("result") or t.get("result")
+            fails = (a or {}).get("failures") if a else t.get("failures")
+            n = {"kind": "case", "title": "Run test case " + name, "suite": path[-1] if path else None, "test": name,
+                 "start": float((a or t).get("started") or t.get("started") or start),
+                 "duration": float((a or t).get("duration") or 0.0), "output": "".join(mine),
+                 "summary": mine[-1] if mine else "", "messages": [], "children": [], "skipped": r == "skipped"}
+            for f in ((a or {}).get("expected_failures") if a else t.get("expected_failures")) or []:
+                n["messages"].append({"type": "test expected failure", "title": "Expected failure: %s" % (f.get("message") or ""),
+                                      "file": f.get("file"), "line": f.get("line")})
+            for f in fails or []:
+                n["messages"].append({"type": "test failure", "title": f.get("message") or "", "file": f.get("file"),
+                                      "line": f.get("line")})
+            if r == "skipped":
+                m = t.get("skip_message")
+                n["messages"].append({"type": "test skipped", "title": "Test skipped: %s" % m if m else "Test skipped"})
+            (suite(path)["children"] if path else roots).append(n)
+        for k in range(1, len(path) + 1):   # Xcode's count: one per test function
+            c = suite(path[:k])["counts"]
+            c[0] += 1
+            c[1] += t.get("result") == "skipped"
+            c[2] += t.get("result") == "failed"
+            c[4] += bool(t.get("expected_failures"))
+    for n in suites.values():
+        own = [ln for ln in lines if re.search(r"Suite %s (started|passed|failed)" % re.escape(n["suite"]), ln)]
+        n["output"], n["summary"] = "".join(own), own[-1] if own else ""
+        n["counts"] = tuple(n["counts"])
+        n["passed_string"] = passed_string(*n["counts"])
+        kids = [c for c in n["children"]]
+        if kids:
+            n["start"] = min(c["start"] for c in kids)
+            n["duration"] = max(c["start"] + c["duration"] for c in kids) - n["start"]
+    return roots
+
+
+def log_tree(text, tests, start):
+    """XCTest's suites and test cases in a test process's output, as Xcode's action log nests them: [{"kind" (suite /
+    case), "title", "suite", "test", "start", "duration", "output" (its lines), "summary", "passed_string",
+    "messages", "skipped", "children"}]. A test case's start is when x86sim test saw it run ("started"), its failures
+    and skip message from results.json."""
+    by_name = {}
+    for t in tests:
+        if not t.get("swift_testing"):
+            by_name[((t.get("class") or "").split(".")[-1], t.get("name"))] = t
+    roots, stack = [], []
+    lines = text.splitlines(True)
+    clock = start
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        bare = ln.rstrip("\n")
+        for n in stack:
+            n["output"] += ln
+        if stack and stack[-1]["kind"] == "case":
+            # a test case's summary: its lines after the last issue (Xcode's), its end line with them
+            stack[-1]["tail"] = "" if ISSUE_LINE.match(bare) else stack[-1]["tail"] + ln
+        m = SUITE_START.match(bare)
+        if m:
+            at = log_time(m.group(2)) or clock
+            node = {"kind": "suite", "title": "Run test suite " + m.group(1), "suite": m.group(1), "test": None,
+                    "start": at, "duration": 0.0, "output": ln, "summary": "", "passed_string": "", "messages": [],
+                    "children": [], "counts": (0, 0, 0, 0, 0)}
+            (stack[-1]["children"] if stack else roots).append(node)
+            stack.append(node)
+            i += 1
+            continue
+        m = SUITE_END.match(bare)
+        if m and stack and stack[-1]["kind"] == "suite" and stack[-1]["suite"] == m.group(1):
+            node = stack.pop()
+            summary = ln
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            e = EXECUTED.match(nxt)
+            if e:
+                summary += nxt
+                for n in stack + [node]:
+                    n["output"] += nxt
+                i += 1
+                def expected(n):
+                    return sum(expected(c) for c in n["children"]) if n["kind"] == "suite" else int(n.get("expected", False))
+                node["counts"] = (int(e.group(1)), int(e.group(2) or 0), int(e.group(3)), int(e.group(4)), expected(node))
+                node["passed_string"] = passed_string(*node["counts"])
+            node["summary"] = summary
+            at = log_time(m.group(3))
+            if at:
+                node["duration"] = max(0.0, at - node["start"])
+                clock = at
+            i += 1
+            continue
+        m = CASE_START.match(bare)
+        if m:
+            cls = m.group(1).split(".")[-1]
+            t = by_name.get((cls, m.group(2)))
+            at = float(t["started"]) if t and t.get("started") else clock
+            node = {"kind": "case", "title": "Run test case %s()" % m.group(2), "suite": cls, "test": m.group(2) + "()",
+                    "start": at, "duration": 0.0, "output": ln, "summary": "", "messages": [], "children": [],
+                    "skipped": False, "_t": t, "tail": ""}
+            (stack[-1]["children"] if stack else roots).append(node)
+            stack.append(node)
+            i += 1
+            continue
+        m = CASE_END.match(bare)
+        if m and stack and stack[-1]["kind"] == "case":
+            node = stack.pop()
+            node["summary"] = node.pop("tail")
+            node["duration"] = float(m.group(4))
+            clock = node["start"] + node["duration"]
+            t = node.pop("_t")
+            if t:
+                node["expected"] = bool(t.get("expected_failures"))
+                for f in t.get("expected_failures") or []:
+                    node["messages"].append({"type": "test expected failure", "title": "Expected failure: %s" % (f.get("message") or ""),
+                                             "file": f.get("file"), "line": f.get("line")})
+                for f in t.get("failures") or []:
+                    node["messages"].append({"type": "test failure", "title": f.get("message") or "",
+                                             "file": f.get("file"), "line": f.get("line")})
+                if m.group(3) == "skipped":
+                    node["skipped"] = True
+                    msg = t.get("skip_message")
+                    node["messages"].append({"type": "test skipped",
+                                             "title": "Test skipped - %s" % msg if msg else "Test skipped"})
+            i += 1
+            continue
+        i += 1
+    for n in stack:   # the process ended inside a suite (crash, timeout)
+        n.pop("_t", None)
+        n.pop("tail", None)
+    return roots
+
+
 def write(summary, bundle_path, products_root=None):
     """Write `summary` (what x86sim test writes as results.json) as the .xcresult bundle `bundle_path` (replaced if it
     is there). products_root: where the run's products and .xctestrun are (the project and scheme names come from its
@@ -1092,7 +1347,7 @@ def write(summary, bundle_path, products_root=None):
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
     try:
-        root = Writer(summary, tmp, products_root).write()
+        root = Writer(summary, tmp, products_root, os.path.abspath(bundle_path.rstrip("/"))).write()
         info = {"dateCreated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0),
                 "directoryImportMode": "concurrent", "externalLocations": [], "rootId": {"hash": root},
                 "storage": {"backend": "fileBacked2", "compression": "standard"}, "version": {"major": 3, "minor": 60}}

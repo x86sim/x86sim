@@ -190,6 +190,7 @@ def mac_tool(remote, name, run):
         check(rc == 0 and "ActionTestPlanRunSummaries" in out, "%s: get object --legacy --id <testsRef>" % name)
     rc, out, err = get("get log --type action --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get log --type action" % name)
+    res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
     # the build: its status and issues; its log when the run built the products (the xcodebuild stand-in's test)
     rc, out, err = get("get build-results --path %s" % b)
     check(rc == 0 and out.strip().startswith("{"), "%s: get build-results" % name)
@@ -271,6 +272,8 @@ def apple(remote_bundle, coverage=False):
             return None
         res[k] = json.loads(out)
     res["legacy_issues"] = legacy_issues(remote_bundle)
+    rc, out, err = ssh("xcrun xcresulttool get log --type action --path %s" % shlex.quote(remote_bundle))
+    res["action_log"] = json.loads(out) if rc == 0 and out.strip().startswith("{") else None
     urls = []
     nodes(res["tests"], urls=urls)
     b = shlex.quote(remote_bundle)
@@ -399,6 +402,32 @@ def details_tree(d):
     return top
 
 
+def action_tree(log):
+    """The test targets' part of an action log as Xcode nests it (`get log --type action`): per section its path of
+    titles (a process's pid left out), result, testDetails keys, tests-passed line, skipped, its failure / skip
+    messages and the first line of its summary without times; not "Launch actions" nor the coverage steps"""
+    out = {}
+
+    def walk(n, path):
+        t = n.get("title") or ""
+        if not t.startswith(("Run test", "Writing")) and t.endswith(")"):
+            t = t.rsplit(" (", 1)[0]
+        path = path + (t,)
+        td = n.get("testDetails") or {}
+        # Swift Testing runs tests in parallel: Xcode's summary of one is often another test's line
+        swift_line = re.match(r"^\s*[\u200b◇✔✘➜↳━]", td.get("summary") or "")
+        summ = "" if swift_line else re.sub(r"\(\d+\.\d+ seconds\)|in [\d.]+ \([\d.]+\) seconds|at \d{4}-\d\d-\d\d [\d:.]+|\d+\.\d+s", "", (td.get("summary") or "").strip().split("\n")[-1])
+        out["/".join(path)] = (n.get("result"), sorted(k for k in td if k != "emittedOutput"), td.get("testsPassedString"),
+                               td.get("wasSkipped"), sorted((m.get("type"), m.get("title")) for m in n.get("messages") or []
+                                                            if m.get("type") != "notice"), summ, td.get("runnableUTI"))
+        for c in n.get("subsections") or []:
+            walk(c, path)
+    for n in (log or {}).get("subsections") or []:
+        if (n.get("title") or "").startswith("Test target "):
+            walk(n, ())
+    return out
+
+
 def compare(ours, theirs, name):
     so, sa = ours["summary"], theirs["summary"]
     for k in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures", "title"):
@@ -433,6 +462,13 @@ def compare(ours, theirs, name):
     for u in ddiff:
         print("     %s\n       ours:  %s\n       Apple: %s" % (u, json.dumps(details_tree(do[u])["runs"], ensure_ascii=False),
                                                          json.dumps(details_tree(da[u])["runs"], ensure_ascii=False)))
+    ao, aa = action_tree(ours.get("action_log")), action_tree(theirs.get("action_log"))
+    if aa:
+        adiff = sorted(k for k in set(ao) | set(aa) if ao.get(k) != aa.get(k))
+        check(not adiff, "%s vs Apple: action log of the test targets (%d sections: processes, suites, test cases, "
+              "their results, tests-passed lines, failure and skip messages, summaries)" % (name, len(aa)))
+        for k in adiff:
+            print("     %s\n       ours:  %s\n       Apple: %s" % (k, ao.get(k), aa.get(k)))
     lo, la = ours.get("legacy_issues") or {}, theirs.get("legacy_issues") or {}
     both = sorted(set(lo) & set(la))
     ldiff = [u for u in both if lo[u] != la[u]]

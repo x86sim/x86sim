@@ -9,7 +9,7 @@
 // XCTest finishes is one line of <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null
 // at the top), "title", "type", "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's
 // ActionTestActivitySummary), which on a Mac goes to the IDE session. Each test it performs is one line of
-// <dir>/tests.jsonl (when it ran).
+// <dir>/tests.jsonl (when it ran); XCTest's debug log goes to <dir>/session.log.
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
@@ -32,7 +32,7 @@ static unsigned xct_seq;
 // attachments written already (one can pass two of the hooked methods): marked on the attachment itself, as a freed
 // one's address is soon another's (a list of addresses dropped the failure triage's "App UI hierarchy" text)
 static char xct_seen_key;
-static IMP xct_invoke_orig, xct_act_orig, xct_issue_orig, xct_case_orig, xct_perform_orig, xct_finish_orig;
+static IMP xct_invoke_orig, xct_act_orig, xct_issue_orig, xct_case_orig, xct_perform_orig, xct_finish_orig, xct_debug_orig;
 
 static const char* xct_cstr(id s)
 {
@@ -211,6 +211,58 @@ static void xct_finish(id self, SEL sel, id date)
 	pthread_mutex_unlock(&xct_mu);
 }
 
+// -[XCTDefaultDebugLogHandler logDebugMessage:]: XCTest's debug log ("Evaluating query:", "... faulted in ..."). With
+// Xcode's IDE session it goes to the session log (the result bundle's Diagnostics/.../Session-<Target>-<time>.log);
+// without one XCTest prints it to stderr, among the test output. As Xcode keeps it: <dir>/session.log (XCTest's own
+// "HH:MM:SS.mmm <process>[<pid>:<thread>] <message>" lines), and not on stderr.
+static void xct_debug_write(const char* m)
+{
+	// XCTest hands the line formatted ("HH:MM:SS.mmm <process>[<pid>:<thread>] <message>\n"), as the session log has it
+	if (!m || !*m)
+		return;
+	char p[1200];
+	snprintf(p, sizeof p, "%s/session.log", xct_dir);
+	pthread_mutex_lock(&xct_mu);
+	FILE* f = fopen(p, "a");
+	if (f) {
+		fputs(m, f);
+		if (m[strlen(m) - 1] != '\n')
+			fputc('\n', f);
+		fclose(f);
+	}
+	pthread_mutex_unlock(&xct_mu);
+}
+
+static void xct_debug(id self, SEL sel, id msg)
+{
+	if (!xct_dir) {
+		if (xct_debug_orig)
+			((void (*)(id, SEL, id)) xct_debug_orig)(self, sel, msg);
+		return;
+	}
+	xct_debug_write(xct_cstr(msg));
+}
+
+// XCTAutomationSupport's debug log (_XCTASLog: "Evaluating query:", "... faulted in ..."): to the logger XCTest sets
+// with XCTASSetDebugLogger (an XCTASDebugLogDelegate: -logDebugMessage:), which on a Mac is the IDE session; without
+// one it goes to os_log, so onto stderr. x86Sim sets one that writes the session log.
+static void xct_set_as_logger(void)
+{
+	static bool done;
+	void (*set)(id) = (void (*)(id)) dlsym(RTLD_DEFAULT, "XCTASSetDebugLogger");
+	if (done || !set || !xct_dir)
+		return;
+	done = true;
+	Class c = objc_allocateClassPair(objc_getClass("NSObject"), "X86SimXCTDebugLog", 0);
+	if (!c)
+		return;
+	class_addMethod(c, sel_registerName("logDebugMessage:"), (IMP) xct_debug, "v@:@");
+	objc_registerClassPair(c);
+	id o = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(Class, SEL)) objc_msgSend)(c, sel_registerName("alloc")),
+	                                        sel_registerName("init"));
+	set(o);
+}
+
 static void xct_act_add(id self, SEL sel, id att) { xct_write(att, "activity", self); ((void (*)(id, SEL, id)) xct_act_orig)(self, sel, att); }
 static void xct_issue_add(id self, SEL sel, id att) { xct_write(att, "issue", NULL); ((void (*)(id, SEL, id)) xct_issue_orig)(self, sel, att); }
 static void xct_case_add(id self, SEL sel, id att) { xct_write(att, "test", NULL); ((void (*)(id, SEL, id)) xct_case_orig)(self, sel, att); }
@@ -230,6 +282,8 @@ static void xct_added(const struct mach_header* mh, intptr_t slide)
 	if (!xct_case_orig) xct_case_orig = xct_hook("XCTestCase", "addAttachment:", (IMP) xct_case_add);
 	if (!xct_perform_orig) xct_perform_orig = xct_hook("XCTestCase", "performTest:", (IMP) xct_perform);
 	if (!xct_finish_orig) xct_finish_orig = xct_hook("XCActivityRecord", "setFinish:", (IMP) xct_finish);
+	if (!xct_debug_orig) xct_debug_orig = xct_hook("XCTDefaultDebugLogHandler", "logDebugMessage:", (IMP) xct_debug);
+	xct_set_as_logger();
 	static bool said;
 	if (!said && xct_invoke_orig) {
 		said = true;

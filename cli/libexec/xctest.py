@@ -27,7 +27,7 @@ when one failed, 2 when nothing could run.
 """
 import atexit, fcntl
 import glob, hashlib, tempfile
-import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, time, urllib.parse, uuid
+import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, threading, time, urllib.parse, uuid
 import xml.etree.ElementTree as ET
 from plistlib import UID
 
@@ -1686,7 +1686,8 @@ class Runner:
             return None
         only, skip = sel
         t0 = time.monotonic()
-        res["started"] = round(time.time(), 3)   # the target's real start, for its result bundle's times
+        t_wall = time.time()
+        res["started"] = round(t_wall, 3)   # the target's real start, for its result bundle's times
         parser = Parser(name)
         rec = None
         if kind == "ui" and t.get("PreferredScreenCaptureFormat", "screenRecording") == "screenRecording" \
@@ -1722,6 +1723,8 @@ class Runner:
                 cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme)
                 env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
                 env["XCTestBundlePath"] = bundle
+                # the test process, as Xcode's action log names it (runnable: what Xcode launched)
+                res["process"], res["runnable"] = "xctest", undv(agent)
                 rel = os.path.relpath(outf, self.data)
                 r = self.simctl.check(self.simctl.request("spawn", path=agent, args=[bundle] + t.get("CommandLineArguments", []),
                                                           env=env, stdout=rel), "spawn")
@@ -1740,6 +1743,8 @@ class Runner:
                     tapp = self.local(t["UITargetAppPath"])
                     tbid, tpath = self.install(tapp)
                 bid, host = self.install(host_local)
+                res["process"] = os.path.basename(app_executable(host_local))
+                res["runnable"] = host_local
                 bundle = self.subst(t["TestBundlePath"], host)
                 if not bundle.startswith(DV):
                     bundle = dv(bundle)
@@ -1806,6 +1811,23 @@ class Runner:
         except SystemExit as e:   # simctl's die(): no answer from the phone
             res["error"] = "the device did not answer (%s)" % e
         res["tests"] = parser.tests
+        # XCTest's debug log (libsimshim: Xcode's session log, which XCTest otherwise prints among the output)
+        sess = os.path.join(att, "session.log")
+        res["session_log"] = os.path.join(self.out, name + ".session.log")
+        now = time.time()
+        with open(res["session_log"], "w") as f:   # Xcode's first lines: the session, the device
+            f.write("%s.%03d x86sim[%d:%d] Beginning test session %s at %s on target %s (%s)\n" % (
+                time.strftime("%H:%M:%S", time.localtime(t_wall)), int(t_wall * 1000) % 1000, os.getpid(),
+                threading.get_ident() % 100000000, name, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_wall)),
+                self.phone, self.rt))
+            f.write("%s.%03d x86sim[%d:%d] Test standard output and standard error is at %s\n" % (
+                time.strftime("%H:%M:%S", time.localtime(now)), int(now * 1000) % 1000, os.getpid(),
+                threading.get_ident() % 100000000, log))
+            if os.path.exists(sess):
+                with open(sess, errors="replace") as g:
+                    f.write(g.read())
+        if os.path.exists(sess):
+            os.unlink(sess)
         res["attachments"] = self.attachments(att, parser.tests)
         if rec:
             rec.keep(os.path.join(self.out, "attachments"), t.get("SystemAttachmentLifetime", "deleteOnSuccess"))
