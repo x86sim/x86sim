@@ -6,7 +6,8 @@ agent does (snapshots, `expect`, `batch`), see [AGENT-TOOLS.md](AGENT-TOOLS.md).
 ## Tests (XCTest, XCUITest)
 
 `x86sim test` runs test bundles on a phone as `xcodebuild test-without-building` does in Apple's simulator, and the
-MCP tool `xctest_run` does the same for agents:
+MCP tool `xctest_run` does the same for agents (with `result_bundle`, `test_iterations`, `retry_tests_on_failure`,
+`run_tests_until_failure` and `only_test_configuration`):
 
 ```sh
 x86sim test qa --xctestrun Products/MyApp_iphonesimulator27.2-arm64.xctestrun   # what build-for-testing wrote
