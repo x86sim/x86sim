@@ -3,12 +3,13 @@
 // result bundle. x86sim test runs XCTest without an IDE session, so they went nowhere. With
 // X86SIM_XCTEST_ATTACHMENTS=<dir> (set by cli/libexec/xctest.py for the test process), each attachment's payload is
 // written to <dir>/<n>.<ext> as it is added, and one JSON line to <dir>/index.jsonl: the test it was added in, its
-// name, type and lifetime (0 keepAlways, 1 deleteOnSuccess), where it came from. xctest.py sorts them per test, drops
-// the deleteOnSuccess ones of passed tests and lists the rest in results.json. An activity's attachment also names
-// its activity ("activity": the XCActivityRecord's uuid), and every activity XCTest finishes is one line of
-// <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null at the top), "title", "type",
-// "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's ActionTestActivitySummary), which on a Mac goes to
-// the IDE session.
+// name, type, time (XCTAttachment.timestamp) and lifetime (0 keepAlways, 1 deleteOnSuccess), where it came from.
+// xctest.py sorts them per test, drops the deleteOnSuccess ones of passed tests and lists the rest in results.json.
+// An activity's attachment also names its activity ("activity": the XCActivityRecord's uuid), and every activity
+// XCTest finishes is one line of <dir>/activities.jsonl: {"test", "uuid", "parent" (its parent activity's uuid, null
+// at the top), "title", "type", "start", "finish" (Unix times)}: XCTest's activity tree (Xcode's
+// ActionTestActivitySummary), which on a Mac goes to the IDE session. Each test it performs is one line of
+// <dir>/tests.jsonl (when it ran).
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static const char* xct_dir;
@@ -70,6 +72,8 @@ static const char* xct_uuid(id o, const char* sel)
 	return u ? xct_cstr(((id (*)(id, SEL)) objc_msgSend)(u, sel_registerName("UUIDString"))) : NULL;
 }
 
+static double xct_now(void);
+
 static void xct_write(id att, const char* from, id activity)
 {
 	if (getenv("X86SIM_XCTEST_ATT_DEBUG")) { char b[160]; int k = snprintf(b, sizeof b, "simshim: attachment %p from %s\n", (void*) att, from); write(2, b, k); }
@@ -95,6 +99,11 @@ static void xct_write(id att, const char* from, id activity)
 	const char* uti = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(att, sel_registerName("uniformTypeIdentifier")));
 	const char* name = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(att, sel_registerName("name")));
 	long lifetime = ((long (*)(id, SEL)) objc_msgSend)(att, sel_registerName("lifetime"));
+	// XCTAttachment.timestamp (Xcode's attachment time in the result bundle); XCTest sets it when the attachment is
+	// added (-captureTimestampIfMissing:), after this hook: now, then
+	SEL tsel = sel_registerName("timestamp");
+	id ts = class_respondsToSelector(object_getClass(att), tsel) ? ((id (*)(id, SEL)) objc_msgSend)(att, tsel) : nil;
+	double when = ts ? ((double (*)(id, SEL)) objc_msgSend)(ts, sel_registerName("timeIntervalSince1970")) : xct_now();
 	char file[64], path[1200];
 	snprintf(file, sizeof file, "%u.%s", n, xct_ext(uti));
 	snprintf(path, sizeof path, "%s/%s", xct_dir, file);
@@ -115,6 +124,7 @@ static void xct_write(id att, const char* from, id activity)
 		fputs(",\"uti\":", f); xct_json_str(f, uti);
 		const char* au = xct_uuid(activity, "uuid");
 		if (au) { fputs(",\"activity\":", f); xct_json_str(f, au); }
+		if (when > 0) fprintf(f, ",\"time\":%.6f", when);
 		fprintf(f, ",\"lifetime\":%ld,\"from\":\"%s\",\"seq\":%u,\"file\":", lifetime, from, n);
 		if (ok) xct_json_str(f, file); else fputs("null", f);
 		fputs("}\n", f);
@@ -134,15 +144,38 @@ static void xct_invoke(id self, SEL sel)
 	xct_test[0] = 0;
 	pthread_mutex_unlock(&xct_mu);
 }
+static double xct_now(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+// every test XCTest performs is one line of <dir>/tests.jsonl: {"test", "start", "finish"} (Unix times), when it
+// really ran (Xcode's ActionTestSummary times come from the IDE session's test-started / -finished messages)
 static void xct_perform(id self, SEL sel, id run)
 {
 	const char* nm = xct_cstr(((id (*)(id, SEL)) objc_msgSend)(self, sel_registerName("name")));
+	char name[512];
+	snprintf(name, sizeof name, "%s", nm ? nm : "");
 	pthread_mutex_lock(&xct_mu);
-	snprintf(xct_case, sizeof xct_case, "%s", nm ? nm : "");
+	snprintf(xct_case, sizeof xct_case, "%s", name);
 	pthread_mutex_unlock(&xct_mu);
+	double start = xct_now();
 	((void (*)(id, SEL, id)) xct_perform_orig)(self, sel, run);
+	double finish = xct_now();
 	pthread_mutex_lock(&xct_mu);
 	xct_case[0] = 0;
+	if (xct_dir && name[0]) {
+		char p[1200];
+		snprintf(p, sizeof p, "%s/tests.jsonl", xct_dir);
+		FILE* f = fopen(p, "a");
+		if (f) {
+			fputs("{\"test\":", f); xct_json_str(f, name);
+			fprintf(f, ",\"start\":%.6f,\"finish\":%.6f}\n", start, finish);
+			fclose(f);
+		}
+	}
 	pthread_mutex_unlock(&xct_mu);
 }
 

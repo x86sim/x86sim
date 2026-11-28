@@ -27,7 +27,7 @@ when one failed, 2 when nothing could run.
 """
 import atexit, fcntl
 import glob, hashlib, tempfile
-import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, time, uuid
+import json, os, plistlib, re, shutil, signal, struct, subprocess, sys, time, urllib.parse, uuid
 import xml.etree.ElementTree as ET
 from plistlib import UID
 
@@ -56,6 +56,8 @@ Options:
   --result-bundle B.xcresult
                           also write an Xcode result bundle (what xcodebuild -resultBundlePath writes; xcresulttool,
                           xccov and CI tools read it): results, failures, attachments, coverage with --coverage
+  --built                 the products were built for this run (xcodebuild test, not test-without-building): the
+                          result bundle's build action succeeded instead of "not requested"
   --json FILE, --junit FILE
                           also write the JSON summary / JUnit XML there ("-": JSON to stdout, nothing else printed)
   --timeout S             per test target (default 1800)
@@ -104,6 +106,14 @@ class URL:
         self.path = path
 
 
+class Num(int):
+    """An NSNumber archived as an object (encodeObject:), not inline"""
+
+
+class MutableDict(dict):
+    """An NSMutableDictionary (XCTest's aggregateStatisticsBeforeCrash is one)"""
+
+
 class NSUUID:
     def __init__(self, u):
         self.u = u
@@ -123,14 +133,15 @@ def archive(root):
     def enc(v):
         if v is None:
             return UID(0)
-        if isinstance(v, (bool, int, float)):
+        if isinstance(v, (bool, int, float)) and not isinstance(v, Num):
             return v
         i = len(objs)
         objs.append(None)
-        if isinstance(v, str):
-            objs[i] = v
+        if isinstance(v, (str, Num)):
+            objs[i] = int(v) if isinstance(v, Num) else v
         elif isinstance(v, URL):
-            objs[i] = {"NS.base": UID(0), "NS.relative": enc("file://" + v.path), "$class": cls(["NSURL", "NSObject"])}
+            u = v.path if "://" in v.path else "file://" + v.path
+            objs[i] = {"NS.base": UID(0), "NS.relative": enc(u), "$class": cls(["NSURL", "NSObject"])}
         elif isinstance(v, NSUUID):
             objs[i] = {"NS.uuidbytes": uuid.UUID(v.u).bytes, "$class": cls(["NSUUID", "NSObject"])}
         elif isinstance(v, (list, tuple)):
@@ -140,7 +151,8 @@ def archive(root):
         elif isinstance(v, dict):
             ks = list(v)
             objs[i] = {"NS.keys": [enc(k) for k in ks], "NS.objects": [enc(v[k]) for k in ks],
-                       "$class": cls(["NSDictionary", "NSObject"])}
+                       "$class": cls(["NSMutableDictionary", "NSDictionary", "NSObject"] if isinstance(v, MutableDict)
+                                     else ["NSDictionary", "NSObject"])}
         elif isinstance(v, Obj):
             d = {k: (x if isinstance(x, bool) else enc(x)) for k, x in v.fields.items()}
             d["$class"] = cls(v.classes)
@@ -183,6 +195,16 @@ def test_identifiers(s, skip=False):
     return out
 
 
+def url_part(s):
+    return urllib.parse.quote(s, safe="()-._~!$&'*+,;=:@")
+
+
+def rel_bundle(bundle):
+    """testBundleRelativePath: a hosted bundle's path in its host app (PlugIns/<name>.xctest), None for a logic test's"""
+    m = re.search(r"\.app/(PlugIns/[^/]+\.xctest)/?$", bundle)
+    return m.group(1) if m else None
+
+
 def identifier_set(ids, skip=False):
     return Obj(["XCTTestIdentifierSet", "NSObject"], {"identifiers": [i for x in ids for i in test_identifiers(x, skip)]})
 
@@ -191,20 +213,36 @@ def identifier_set(ids, skip=False):
 INTEROP_MODES = {"none": 0, "limited": 1, "complete": 2, "strict": 3}
 
 
+# an .xctestrun's SystemAttachmentLifetime / UserAttachmentLifetime as XCTestConfiguration has them (XCTAttachmentLifetime)
+LIFETIMES = {"keepAlways": 0, "deleteOnSuccess": 1, "keepNever": 2}
+
+
 def configuration(bundle, module, target_path=None, target_bid=None, target_args=(), target_env=None, ui=False,
-                  only=None, skip=(), interop=2):
+                  only=None, skip=(), interop=2, t=None, scheme=None):
+    """The XCTestConfiguration Xcode 27.2 hands a test process in `xcodebuild test-without-building` (read on the Mac
+    from XCTestConfiguration.activeTestConfiguration), less what only its IDE session has (reportResultsToIDE,
+    sessionIdentifier, IDECapabilities, testApplicationDependencies). t: the .xctestrun target (attachment
+    lifetimes); scheme: Runner.scheme_info() (the project's name and the scheme's products: crash report emphasis,
+    symbolication, the apps' bundle infos), None for none."""
+    t, scheme = t or {}, scheme or {}
+    to_run = identifier_set(only) if only else None
     sel = Obj(["XCTTestSelection", "NSObject"], {
-        "IdentifiersToRun": identifier_set(only) if only else None, "IdentifiersToSkip": identifier_set(skip, skip=True),
+        "IdentifiersToRun": to_run, "IdentifiersToSkip": identifier_set(skip, skip=True),
         "TagsToRun": None,
         "TagsToSkip": Obj(["XCTTagSelection", "NSObject"], {"XCTTagSelectionIncludeXCTests": False,
                                                           "XCTTagSelectionMode": 1, "XCTTagSelectionTagSet": set()})})
     f = {
-        "ApplicationBundleInfos": None, "EnablePerformanceTestsDiagnostics": None, "IDECapabilities": None,
-        "IsMemoryTaggingAddressSanitizerEnabled": False, "aggregateStatisticsBeforeCrash": None,
+        "ApplicationBundleInfos": scheme.get("bundle_infos") if ui else None,
+        "EnablePerformanceTestsDiagnostics": None, "IDECapabilities": None,
+        "IsMemoryTaggingAddressSanitizerEnabled": False,
+        "aggregateStatisticsBeforeCrash": MutableDict(XCSuiteRecordsKey=MutableDict()),
         "applicationCrashDetectionPolicy": Obj(["XCTApplicationCrashDetectionPolicy", "NSObject"],
                                                {"XCTApplicationCrashDetectionSeverity": 2}),
-        "automationFrameworkPath": None, "baseTestsURL": None, "baselineFileRelativePath": None, "baselineFileURL": None,
-        "bundleIDsForCrashReportEmphasis": None, "defaultTestExecutionTimeAllowance": None,
+        "automationFrameworkPath": scheme.get("automation"),
+        "baseTestsURL": URL("test://com.apple.xcode/%s/%s" % (url_part(scheme["project"]), url_part(module)))
+        if scheme.get("project") else None,
+        "baselineFileRelativePath": None, "baselineFileURL": None,
+        "bundleIDsForCrashReportEmphasis": scheme.get("bundle_ids"), "defaultTestExecutionTimeAllowance": Num(600),
         "deferSymbolicationToHarness": False, "disablePerformanceMetrics": False, "emitOSLogs": False, "formatVersion": 2,
         "gatherLocalizableStringsData": False,
         "hangDetectionPolicy": Obj(["XCTHangDetectionPolicy", "NSObject"],
@@ -220,16 +258,23 @@ def configuration(bundle, module, target_path=None, target_bid=None, target_args
         "reportActivities": True, "reportResultsToIDE": False, "resultChannelConfiguration": None,
         "runAsMultiDeviceRemoteRunner": False,
         "runtimeDiagnosticsPolicy": Obj(["XCTRuntimeDiagnosticsPolicy", "NSObject"], {}),
-        "sessionIdentifier": None, "shouldExtractMultiDeviceRequirements": False, "symbolicationImageNames": None,
-        "systemAttachmentLifetime": 1,   # deleteOnSuccess, as Xcode: failure screenshots are kept (#50)
+        "sessionIdentifier": None, "shouldExtractMultiDeviceRequirements": False,
+        "symbolicationImageNames": scheme.get("image_names"),
+        # deleteOnSuccess by default, as Xcode: failure screenshots are kept (#50)
+        "systemAttachmentLifetime": LIFETIMES.get(t.get("SystemAttachmentLifetime"), 1),
         "targetApplicationArguments": list(target_args) if target_path else None,
         "targetApplicationBundleID": target_bid,
         "targetApplicationEnvironment": dict(target_env or {}) if target_path else None,
-        "targetApplicationPath": target_path, "testApplicationDependencies": None, "testApplicationUserOverrides": None,
-        "testBundleRelativePath": None, "testBundleURL": URL(bundle), "testExecutionOrdering": 0,
-        "testInstructionsSet": None, "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": False,
-        "testsDrivenByIDE": False, "testsMustRunOnMainThread": False, "traceCollectionEnabled_v2": None,
-        "treatMissingBaselinesAsFailures": False, "userAttachmentLifetime": 0,
+        # testApplicationDependencies (Xcode: the scheme's apps by bundle id) is left out: with it, XCUIApplication has
+        # Xcode launch the app over the IDE session ("Failed to launch ... via Xcode: no connection to Xcode exists")
+        "targetApplicationPath": target_path, "testApplicationDependencies": None,
+        "testApplicationUserOverrides": None,
+        "testBundleRelativePath": rel_bundle(bundle), "testBundleURL": URL(bundle.rstrip("/") + "/"),
+        "testExecutionOrdering": 0, "testIdentifiersToRun": to_run, "testInstructionsSet": None,
+        "testInteropMode": interop, "testSelection": sel, "testTimeoutsEnabled": False,
+        "testsDrivenByIDE": False, "testsMustRunOnMainThread": ui, "traceCollectionEnabled_v2": None,
+        "treatMissingBaselinesAsFailures": False,
+        "userAttachmentLifetime": LIFETIMES.get(t.get("UserAttachmentLifetime"), 1),
     }
     return archive(Obj(["XCTestConfiguration", "NSObject"], f))
 
@@ -394,6 +439,9 @@ def load_xctestrun(path, products):
     else:
         targets = [dict(v, _name=k) for k, v in d.items() if not k.startswith("__") and isinstance(v, dict)]
     targets.sort(key=lambda t: t.get("RunOrder", 0))
+    container = (meta.get("ContainerInfo") or d.get("ContainerInfo") or {}).get("ContainerName")
+    for t in targets:
+        t["_container"] = container or t.get("BlueprintProviderName")
     return root, targets
 
 
@@ -855,8 +903,12 @@ def swift_testing_results(lines):
         now = st_seconds(ev.get("instant"))
         if k == "testStarted":
             t["_start"] = now
+            if d.get("time"):
+                t["started"] = round(d["time"], 6)   # wall clock (libsimswt's), where the result bundle places it
         elif k == "testCaseStarted" and case is not None:
             case["_start"] = now
+            if d.get("time"):
+                case["started"] = round(d["time"], 6)
         elif k == "testCaseEnded" and case is not None:
             case["result"] = "failed" if case["failures"] else "expected_failure" if case.get("expected_failures") else "passed"
             if case["_start"] is not None:
@@ -1463,6 +1515,55 @@ class Runner:
         self.installed[app] = (bid, path)
         return bid, path
 
+    def scheme_info(self, targets):
+        """What Xcode puts in every test process's XCTestConfiguration about the scheme (configuration()): the project's
+        name (baseTestsURL), its products (DependentProductPaths of the .xctestrun, else each target's bundle and apps)
+        by image name (symbolicationImageNames) and bundle id (bundleIDsForCrashReportEmphasis: the test bundles and
+        apps, not UI test runners), its apps' bundle infos for UI tests (ApplicationBundleInfos: localizations and the
+        supported orientations), XCTAutomationSupport's path."""
+        paths = []
+        for t in targets:
+            deps = [self.local(x) for x in t.get("DependentProductPaths") or []]
+            if not deps:
+                host = self.local(t["TestHostPath"]) if t.get("TestHostPath") and kind_of(t) != "logic" else None
+                b = t.get("TestBundlePath") or ""
+                if host and b.startswith("__TESTHOST__/"):
+                    b = os.path.join(host, b[len("__TESTHOST__/"):])
+                else:
+                    b = self.local(b) if b else None
+                app = self.local(t["UITargetAppPath"]) if t.get("UITargetAppPath") else None
+                deps = [x for x in (app, host, b) if x]
+            paths += [x for x in deps if x not in paths and os.path.isdir(x)]
+        names, bids, infos = [], [], {}
+        for x in paths:
+            try:
+                with open(os.path.join(x, "Info.plist"), "rb") as f:
+                    info = plistlib.load(f)
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                info = {}
+            exe = info.get("CFBundleExecutable") or os.path.splitext(os.path.basename(x))[0]
+            if exe not in names:
+                names.append(exe)
+            bid = info.get("CFBundleIdentifier")
+            if not bid:
+                continue
+            if not bid.endswith(".xctrunner") and bid not in bids:
+                bids.append(bid)
+            if x.endswith(".app"):
+                locs = sorted(d[:-6] for d in os.listdir(x) if d.endswith(".lproj") and d != "Base.lproj")
+                infos[bid] = Obj(["XCTApplicationBundleInfo", "NSObject"], {
+                    "localizations": set(locs or [info.get("CFBundleDevelopmentRegion") or "en"]),
+                    "info": {k: v for k, v in info.items() if k.startswith("UISupportedInterfaceOrientations")},
+                    "infoUnprocessed": True})
+        auto = os.path.join(self.rtroot, "Developer/Library/PrivateFrameworks/XCTAutomationSupport.framework")
+        project = self.a.get("spm_project") or next((t["_container"] for t in targets if t.get("_container")), None)
+        if not project:
+            import xcresult
+            project = xcresult.guess_project([{"name": t["_name"]} for t in targets])
+        # NSSets, as Xcode archives them (XCTest's initWithCoder: refuses an NSArray there)
+        return {"project": project, "image_names": set(names) or None, "bundle_ids": set(bids) or None,
+                "bundle_infos": infos or None, "automation": dv(auto) if os.path.isdir(auto) else None}
+
     def subst(self, s, host=None):
         s = s.replace("__TESTROOT__", dv(self.root)).replace("__PLATFORMS__", dv(self.platforms))
         if host:
@@ -1583,6 +1684,7 @@ class Runner:
             return None
         only, skip = sel
         t0 = time.monotonic()
+        res["started"] = round(time.time(), 3)   # the target's real start, for its result bundle's times
         parser = Parser(name)
         rec = None
         if kind == "ui" and t.get("PreferredScreenCaptureFormat", "screenRecording") == "screenRecording" \
@@ -1615,7 +1717,8 @@ class Runner:
                 env["X86SIM_XCTEST_ATTACHMENTS"] = dv(att)
                 env["X86SIM_SWT_EVENTS"] = dv(swt_events)
                 env["X86SIM_SWT_ISSUES"] = dv(swt_issues)
-                env["XCTestConfigurationFilePath"] = self.write_config(name, configuration(bundle, module, only=only or None, skip=skip, interop=interop))
+                cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t, scheme=self.scheme)
+                env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
                 r = self.simctl.check(self.simctl.request("spawn", path=agent, args=[bundle] + t.get("CommandLineArguments", []),
@@ -1649,9 +1752,11 @@ class Runner:
                         tenv["X86SIM_A64_GENV_" + k] = tenv[k]
                     cfg = configuration(bundle, module, target_path=tpath, target_bid=tbid,
                                         target_args=[self.subst(x, host) for x in t.get("UITargetAppCommandLineArguments", [])],
-                                        target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop)
+                                        target_env=tenv, ui=True, only=only or None, skip=skip, interop=interop, t=t,
+                                        scheme=self.scheme)
                 else:
-                    cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop)
+                    cfg = configuration(bundle, module, only=only or None, skip=skip, interop=interop, t=t,
+                                        scheme=self.scheme)
                 env["XCTestConfigurationFilePath"] = self.write_config(name, cfg)
                 env["XCTestBundlePath"] = bundle
                 rel = os.path.relpath(outf, self.data)
@@ -1720,6 +1825,7 @@ class Runner:
         except OSError:
             lines = []
         self.activities(raw, tests)
+        self.start_times(raw, tests)
         used = set()
         for ln in lines:
             try:
@@ -1751,6 +1857,8 @@ class Runner:
             except OSError:
                 continue
             item = {"name": e.get("name"), "path": dst, "type": e.get("uti"), "from": e.get("from")}
+            if e.get("time"):
+                item["time"] = e["time"]   # XCTAttachment.timestamp (libsimshim's): when the test made it
             if e.get("activity"):
                 item["activity"] = e["activity"]   # the uuid of its activity (its test's "activities")
             (t.setdefault("attachments", []) if t else loose).append(item)
@@ -1760,6 +1868,28 @@ class Runner:
         except OSError:
             pass
         return loose
+
+    @staticmethod
+    def start_times(raw, tests):
+        """When each XCTest test really ran (libsimshim's tests.jsonl: -[XCTestCase performTest:]'s start and end, Unix
+        times): the test's "started", where its result bundle entry and activities are placed, as Xcode's are."""
+        try:
+            lines = open(os.path.join(raw, "tests.jsonl")).read().splitlines()
+        except OSError:
+            return
+        for ln in lines:
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            m = re.match(r"-\[(\S+) (\S+)\]$", e.get("test") or "")
+            if not m or not e.get("start"):
+                continue
+            cls, tn = m.group(1).split(".")[-1], m.group(2)
+            t = next((x for x in tests if not x.get("swift_testing") and x["name"] == tn
+                      and x["class"].split(".")[-1] == cls and "started" not in x), None)
+            if t is not None:
+                t["started"] = round(e["start"], 6)
 
     @staticmethod
     def activities(raw, tests):
@@ -1800,6 +1930,7 @@ class Runner:
             if not targets:
                 die("no test target named %s" % ", ".join(self.a["targets"]))
         self.names = {n for t in targets for n in [t["_name"]] + list(t.get("_modules", ()))}
+        self.scheme = self.scheme_info(targets)
         t0 = time.time()
         results = [r for r in (self.run_target(t) for t in targets) if r]
         cov = coverage(self.profraw, self.root, os.path.join(self.out, "coverage"), self.say) if self.a["coverage"] else None
@@ -1924,7 +2055,8 @@ def summary(run, results, t0):
     counts["total"] = len(tests)
     ok = results and all(r["result"] == "passed" for r in results)
     return {"phone": run.phone, "device": run.dev, "runtime": run.rt, "platform": run.plat,
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "duration": round(time.time() - t0, 3),
+            "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t0)), "started_unix": round(t0, 3),
+            "duration": round(time.time() - t0, 3),
             "result": "passed" if ok else "failed", "counts": counts, "out": run.out, "targets": results}
 
 
@@ -2026,7 +2158,8 @@ def fetch_platform(args):
 def parse(argv):
     a = {"xctestrun": None, "products": None, "app": None, "bundles": [], "runner": None, "spm": None, "only": [],
          "skip": [], "targets": [], "platform": None, "out": None, "json": None, "junit": None, "timeout": 1800.0,
-         "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None}
+         "verbose": False, "quiet": False, "coverage": False, "no_recording": False, "result_bundle": None,
+         "built": False}
     it = iter(argv)
     for x in it:
         k, _, v = x.partition("=") if x.startswith("--") else (x, "", "")
@@ -2062,6 +2195,8 @@ def parse(argv):
             a["json"] = val()
         elif k == "--junit":
             a["junit"] = val()
+        elif k == "--built":
+            a["built"] = True
         elif k == "--result-bundle":
             a["result_bundle"] = val()
         elif k == "--timeout":
@@ -2103,6 +2238,8 @@ def main(argv):
     except (RuntimeError, OSError, plistlib.InvalidFileException) as e:
         die(str(e))
     s = run.run(root, targets)
+    if a["built"]:
+        s["build"] = "succeeded"   # the result bundle's build action (xcodebuild test built the products)
     if a.get("spm_project"):   # the package: the .xcresult's project and scheme, as Xcode names them
         s.setdefault("project", a["spm_project"])
     with open(os.path.join(run.out, "results.json"), "w") as f:

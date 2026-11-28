@@ -661,7 +661,7 @@ class Writer:
         self.plan = summary.get("test_plan") or info.get("plan") or self.scheme
         self.source = summary.get("source_root") or info.get("source")
         self.di = device_info(summary)
-        self.t0 = parse_time(summary.get("started"))
+        self.t0 = float(summary["started_unix"]) if summary.get("started_unix") else parse_time(summary.get("started"))
         self.issues = []
 
     def url(self, *parts):
@@ -687,9 +687,9 @@ class Writer:
             name = "kXCTAttachmentScreenRecording"   # xctest.py's recording of the test: XCTest's own name for it
             when = start
         else:
-            try:
-                when = min(max(os.path.getmtime(path), start), end)
-            except OSError:
+            try:   # XCTAttachment.timestamp (x86sim test's "time"), else when its file was written
+                when = min(max(float(a.get("time") or os.path.getmtime(path)), start), end)
+            except (OSError, ValueError):
                 when = end
         u = uid("attachment", path)
         ext = os.path.splitext(path)[1]
@@ -848,8 +848,12 @@ class Writer:
         skips = skip_locations(target.get("log"))
         classes, order = {}, []
         tests = target.get("tests") or []
-        # XCTest runs the tests after the process is up: they end when the target's run ends
+        # each test where it really started (x86sim test's "started": libsimshim's / libsimswt's wall clock); without
+        # that, the tests run after the process is up and end when the target's run ends
         clock = max(start, start + float(target.get("duration") or 0) - sum(float(t.get("duration") or 0) for t in tests))
+
+        def when(t):
+            return max(float(t["started"]), start) if t.get("started") else clock
         # Swift Testing's tests: beside "All tests", in their suites' groups (nested, as Xcode keeps them)
         swift = {"tests": [], "suites": {}, "order": []}
         for t in tests:
@@ -862,8 +866,9 @@ class Writer:
                     node["order"].append(s)
                 node = node["suites"][s]
             for a in t.get("arguments") or [None]:
-                md, dur = self.test_summary(target, t, clock, skips, a)
-                clock += dur
+                at = when(a or t)
+                md, dur = self.test_summary(target, t, at, skips, a)
+                clock = at + dur
                 node["tests"].append((md, dur))
 
         def swift_nodes(node):
@@ -881,8 +886,9 @@ class Writer:
             if cls not in classes:
                 classes[cls] = []
                 order.append(cls)
-            md, dur = self.test_summary(target, t, clock, skips)
-            clock += dur
+            at = when(t)
+            md, dur = self.test_summary(target, t, at, skips)
+            clock = at + dur
             classes[cls].append((md, dur))
         groups, total = [], 0.0
         for cls in order:
@@ -938,9 +944,10 @@ class Writer:
         targets = s.get("targets") or []
         clock, testables, logs = self.t0, [], []
         for t in targets:
-            testables.append(self.testable(t, clock))
-            logs.append(self.log_section(t, clock))
-            clock += float(t.get("duration") or 0)
+            at = max(float(t["started"]), self.t0) if t.get("started") else clock   # its real start (x86sim test's)
+            testables.append(self.testable(t, at))
+            logs.append(self.log_section(t, at))
+            clock = at + float(t.get("duration") or 0)
         end = self.t0 + float(s.get("duration") or (clock - self.t0))
         tests_ref = self.st.obj(O("ActionTestPlanRunSummaries", summaries=[
             O("ActionTestPlanRunSummary", name=S(RUN_NAME), testableSummaries=testables)]))
@@ -977,14 +984,18 @@ class Writer:
         action = O("ActionResult", resultName=S("action"), status=S("failed" if failed else "succeeded"), metrics=metrics(),
                    issues=issues(self.issues), coverage=cov, logRef=Ref(log_ref, "ActivityLogSection"),
                    testsRef=Ref(tests_ref, "ActionTestPlanRunSummaries"), diagnosticsRef=Ref(diag) if diag else None)
-        build = O("ActionResult", resultName=S("build"), status=S("succeeded"), metrics=metrics(False), issues=issues([]),
-                  coverage=nocov)
+        # Xcode's build action: "notRequested" for test-without-building (x86sim test), "succeeded" when the run built
+        # the products first (the xcodebuild stand-in's test: x86sim test --built), still without its log
+        build = O("ActionResult", resultName=S("build"), status=S(s.get("build") or "notRequested"), metrics=metrics(False),
+                  issues=issues([]), coverage=nocov)
         dest = O("ActionRunDestinationRecord", displayName=S(di["name"]), targetArchitecture=S(di["arch"]),
                  targetDeviceRecord=device_record(di), localComputerRecord=host_record(),
                  targetSDKRecord=O("ActionSDKRecord", name=S(di["sdkname"]), identifier=S(di["sdk"]),
                                    operatingSystemVersion=S(di["version"]), isInternal=B(False)))
         rec = O("ActionRecord", schemeCommandName=S("Test"), schemeTaskName=S("Action"),
-                title=S("Testing project %s with scheme %s" % (self.project, self.scheme)), startedTime=T(self.t0),
+                # test-without-building's action has no title (Xcode 27.2), xcodebuild test's names the project
+                title=S("Testing project %s with scheme %s" % (self.project, self.scheme)) if s.get("build") else None,
+                startedTime=T(self.t0),
                 endedTime=T(end), runDestination=dest, buildResult=build, actionResult=action, testPlanName=S(self.plan))
         ws = os.path.join(self.source, self.project + ".xcodeproj") if self.source else self.project + ".xcodeproj"
         meta = self.st.obj(O("ActionsInvocationMetadata", creatingWorkspaceFilePath=S(ws),
