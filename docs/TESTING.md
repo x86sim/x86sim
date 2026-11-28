@@ -69,7 +69,8 @@ x86sim test qa --xctestrun F.xctestrun --result-bundle R.xcresult   # also an Xc
   a parameterized test, UI tests' activity trees (UI snapshots, waits, taps) with their attachments, the frames
   Xcode names in the UI test runner, and the action log Xcode writes (`get log --type action`: each test process,
   its suites and test cases, XCTest's and Swift Testing's, with their own output, summary, failures, skips, known
-  issues and Xcode's "N tests total, P passed, ..." lines) with XCTest's debug log as the session log in the
+  issues and Xcode's "N tests total, P passed, ..." lines; each install and launch with its environment; the
+  coverage report's steps) with XCTest's debug log as the session log in the
   diagnostics (`export diagnostics`; XCTest would print it among the test output without Xcode's IDE session). `tests/xcresult/check.py` compares bundles with Apple's on the comparison Mac:
   test-details, the legacy issue summaries, frames and activities.
   The `xcodebuild` stand-in writes the bundle at `-resultBundlePath` and `x86sim test`'s own output next to it
@@ -126,10 +127,10 @@ What still differs from Xcode 27.2 on a Mac, measured with the fixtures above (n
   entitlements", "Process product packaging" and "Write Entitlements-Simulated.plist"); the Swift driver's per-file
   jobs and explicit modules are timed from the files they wrote, and their compiler output is only the diagnostics
   (Xcode keeps the whole output, the failed frontend command with it). The run destination's host record describes
-  the Linux machine (the environment reads `XCTestDemo`, not `XCTestDemo · Built with macOS …`). The action log has
-  no "Launch actions" (installs and launches with their environments) nor the coverage report's steps, and a Swift
-  Testing test's summary is its own last line (Xcode's, as Swift Testing runs tests in parallel, is often another
-  test's). How often a UI test's "Waiting …" activity re-checks before it times out
+  the Linux machine (the environment reads `XCTestDemo`, not `XCTestDemo · Built with macOS …`). In the action log,
+  "Launch actions" and "Generating coverage report" have Xcode's steps but not all of its notes (Xcode's console
+  policy, resume and per-app profile download lines), and a Swift Testing test's summary is its own last line
+  (Xcode's, as Swift Testing runs tests in parallel, is often another test's). How often a UI test's "Waiting …" activity re-checks before it times out
   depends on timing, so a slow host can record a different count than Apple's.
 - **Selection**: a bare `-only-testing Class` (no target) selects that class in every target; Xcode refuses it.
 - **Swift packages**: SwiftPM builds one `<Package>PackageTests` bundle; `x86sim test --spm` relinks it once per test

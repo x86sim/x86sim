@@ -1485,6 +1485,7 @@ class Runner:
                                             "%s-%s" % (self.phone, time.strftime("%Y%m%d-%H%M%S")))
         os.makedirs(self.out, exist_ok=True)
         self.installed = {}
+        self.install_times = {}   # app -> (start, end) of its install (Xcode's "Installing built products")
         self.insert = ""
         try:
             for l in open(os.path.join(self.dev, "sim.env")):
@@ -1509,12 +1510,14 @@ class Runner:
             return self.installed[app]
         bid = bundle_id(app)
         self.say("Installing %s (%s)" % (os.path.basename(app), bid))
+        t0 = time.time()
         r = subprocess.run([os.path.join(HERE, "appinstall.sh"), "install", app], capture_output=True, text=True,
                            env=dict(os.environ, X86SIM_DEVICE=self.dev))
         if r.returncode:
             raise RuntimeError("install %s failed: %s" % (app, (r.stderr or r.stdout).strip()[-500:]))
         path = self.simctl.app_info(bid)["Path"]
         self.installed[app] = (bid, path)
+        self.install_times[app] = (t0, time.time())
         return bid, path
 
     def scheme_info(self, targets):
@@ -1726,8 +1729,11 @@ class Runner:
                 # the test process, as Xcode's action log names it (runnable: what Xcode launched)
                 res["process"], res["runnable"] = "xctest", undv(agent)
                 rel = os.path.relpath(outf, self.data)
+                t_launch = time.time()
                 r = self.simctl.check(self.simctl.request("spawn", path=agent, args=[bundle] + t.get("CommandLineArguments", []),
                                                           env=env, stdout=rel), "spawn")
+                res["launch"] = {"time": t_launch, "duration": time.time() - t_launch, "path": undv(agent),
+                                 "env": env, "pid": r.get("pid")}
                 exitf = outf + ".exit"
                 alive = lambda: not os.path.exists(exitf)   # noqa: E731
                 bid = None
@@ -1775,10 +1781,18 @@ class Runner:
                     # screenshots. x86sim records the screen itself (Recorder), so XCTest's recording never starts;
                     # its DisableDiagnosticScreenshots default (the same policy's screenshotsDisabled) does the same.
                     args += ["-DisableDiagnosticScreenshots", "YES"]
+                t_launch = time.time()
                 r = self.simctl.check(self.simctl.request("launch", timeout=50, bundle=bid, env=env,
                                                           args=args, stdout=rel, stderr=rel,
                                                           terminate=True), "launch")
                 pid = r.get("pid")
+                # Xcode's "Launch actions": the install of the test host and its launch, with its environment
+                ins = self.install_times.get(os.path.realpath(host_local))
+                res["launch"] = {"time": t_launch, "duration": time.time() - t_launch, "path": host_local, "bid": bid,
+                                 "env": env, "pid": pid, "args": args, "install": list(ins) if ins else None}
+                if kind == "ui":   # the app the UI tests launch (XCUIApplication.launch(): Xcode logs each)
+                    tins = self.install_times.get(os.path.realpath(tapp))
+                    res["launch"]["target"] = {"path": tapp, "bid": tbid, "install": list(tins) if tins else None}
                 alive = lambda: self.simctl.pidof(bid) is not None   # noqa: E731
                 time.sleep(1)
             with open(log, "wb") as raw:
@@ -2029,7 +2043,13 @@ def coverage(profraw, root, out, say):
         say("\ncoverage: " + res["error"])
         return res
     pd = os.path.join(out, "Coverage.profdata")
+    # Xcode's action log ("Generating coverage report"): the profiles, the merge with llvm-profdata's version, times
+    res["profiles"], res["started"] = len(raws), round(time.time(), 3)
+    v = subprocess.run([profdata, "--version"], capture_output=True, text=True).stdout
+    m = re.search(r"version\s+(\S+)", v)
+    res["profdata_version"] = m.group(1) if m else None
     r = subprocess.run([profdata, "merge", "-sparse", "-o", pd] + raws, capture_output=True, text=True)
+    res["merged"] = round(time.time(), 3)
     if r.returncode:
         res["error"] = "llvm-profdata merge: " + (r.stderr.strip().splitlines() or ["failed"])[-1]
         say("\ncoverage: " + res["error"])
@@ -2057,6 +2077,7 @@ def coverage(profraw, root, out, say):
         r = subprocess.run([cov, "export", "-format=lcov", "-instr-profile", pd] + objs, capture_output=True, text=True)
         lcov.append(r.stdout)
     res["lines"] = {"covered": tot_c, "executable": tot_n, "percent": round(100.0 * tot_c / tot_n, 2) if tot_n else 0.0}
+    res["finished"] = round(time.time(), 3)
     with open(os.path.join(out, "lcov.info"), "w") as f:
         f.write("".join(lcov))
     with open(os.path.join(out, "coverage.json"), "w") as f:

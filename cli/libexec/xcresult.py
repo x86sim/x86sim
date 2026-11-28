@@ -1018,6 +1018,120 @@ class Writer:
         return O("ActivityLogUnitTestSection", **f)
 
     @staticmethod
+    def app_launches(target, bid):
+        """(start, end) of every "Launch <bid>" activity of the target's tests"""
+        out = []
+
+        def walk(nodes):
+            for n in nodes or []:
+                if n.get("title") == "Launch " + bid and n.get("start"):
+                    out.append((float(n["start"]), float(n.get("finish") or n["start"])))
+                walk(n.get("children"))
+        for t in target.get("tests") or []:
+            walk(t.get("activities"))
+        return out
+
+    def launch_actions(self, targets):
+        """Xcode's "Launch actions": per test target, the device, the install of its host ("Installing built
+        products") and the launch of its test process ("Launching T": its environment, path and pid), from x86sim
+        test's "launch" records"""
+        di = self.di
+        dev = [("Platform: %s" % di["pdesc"]), "Device Identifier: %s" % di["udid"],
+               "Operating System Version: %s (%s)" % (di["version"], di["build"]) if di["build"] else
+               "Operating System Version: %s" % di["version"],
+               "Model: %s (%s)" % (di["model"], di["code"]) if di["code"] else "Model: %s" % di["model"],
+               "Target Architecture: %s" % di["arch"]]
+
+        def notes(lines):
+            return [O("ActivityLogMessage", type=S("notice"), title=S(x), shortTitle=S(x), annotations=[]) for x in lines]
+        subs = []
+        for t in targets:
+            ln = t.get("launch")
+            if not ln:
+                continue
+            start = float(ln["time"])
+            kids = []
+            ins = ln.get("install") or [start, start]   # Xcode installs before every launch (a logic test's: nothing)
+            if ins:
+                kids.append(O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                              title=S("Installing built products"), startTime=T(ins[0]), duration=D(ins[1] - ins[0]),
+                              result=S("succeeded"), subsections=[], attachments=[], commandDetails=S(""),
+                              emittedOutput=S(""), exitCode=I(0),
+                              messages=notes(["Installing on %s" % di["name"], "Successfully installed"])))
+            env = "".join("%s=%s\n" % (k, v) for k, v in (ln.get("env") or {}).items()
+                          if not k.startswith(("X86SIM_",)))
+            details = "Environment variables:\n" + env
+            if ln.get("args"):
+                details += "\nArguments:\n" + "".join("%s\n" % a for a in ln["args"])
+            what = ln.get("bid") or t["name"]
+            kids.append(O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Launching %s" % t["name"]), startTime=T(start), duration=D(ln.get("duration") or 0),
+                          result=S("succeeded"), subsections=[], attachments=[], commandDetails=S(details),
+                          emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Launching %s" % (t["name"] if not ln.get("bid") else what),
+                                          "Launching from %s" % ln.get("path"),
+                                          "Successfully launched %s" % t["name"]]
+                                         + (["Process with pid %s launched" % ln["pid"]] if ln.get("pid") else []))))
+            first = min([start] + ([ins[0]] if ins else []))
+            subs.append(O("ActivityLogSection", domainType=S("com.apple.dt.IDE.LogSection"), title=S("Launch %s" % t["name"]),
+                          startTime=T(first), duration=D(start + float(ln.get("duration") or 0) - first),
+                          result=S("succeeded"), subsections=kids, messages=notes(dev), attachments=[]))
+            # each launch of the app under test (XCUIApplication: the tests' "Launch <bundle id>" activities)
+            tg = ln.get("target")
+            if tg:
+                app = os.path.splitext(os.path.basename(tg["path"]))[0]
+                for x in sorted(self.app_launches(t, tg["bid"])):
+                    subs.append(O("ActivityLogSection", domainType=S("com.apple.dt.IDE.LogSection"), title=S("Launch %s" % app),
+                                  startTime=T(x[0]), duration=D(x[1] - x[0]), result=S("succeeded"), messages=notes(dev),
+                                  attachments=[], subsections=[
+                        O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Installing built products"), startTime=T(x[0]), duration=D(0.0), result=S("succeeded"),
+                          subsections=[], attachments=[], commandDetails=S(""), emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Installing on %s" % di["name"], "Successfully installed"])),
+                        O("ActivityLogCommandInvocationSection", domainType=S("com.apple.dt.IDE.LogSection"),
+                          title=S("Launching %s" % app), startTime=T(x[0]), duration=D(x[1] - x[0]), result=S("succeeded"),
+                          subsections=[], attachments=[], commandDetails=S(""), emittedOutput=S(""), exitCode=I(0),
+                          messages=notes(["Launching %s" % tg["bid"], "Launching from %s" % tg["path"],
+                                          "Successfully launched %s" % app]))]))
+        if not subs:
+            return None
+        t0 = min(float(t["launch"].get("install", [t["launch"]["time"]])[0] if t["launch"].get("install") else t["launch"]["time"])
+                 for t in targets if t.get("launch"))
+        t1 = max(float(t["launch"]["time"]) + float(t["launch"].get("duration") or 0) for t in targets if t.get("launch"))
+        return O("ActivityLogSection", domainType=S("Xcode.IDEActivityLogDomainType.LaunchLog"), title=S("Launch actions"),
+                 startTime=T(t0), duration=D(t1 - t0), result=S("succeeded"), subsections=subs, messages=[], attachments=[])
+
+    def coverage_log(self, cov):
+        """Xcode's "Generating coverage report" steps (from x86sim test's coverage record): the profiles, their merge
+        with llvm-profdata, the source files with line coverage, an entry per product"""
+        if not cov or not cov.get("started") or not cov.get("products"):
+            return None
+
+        def notes(lines):
+            return [O("ActivityLogMessage", type=S("notice"), title=S(x), shortTitle=S(x), annotations=[]) for x in lines]
+
+        def step(title, t0, t1, msgs=(), details=True):
+            f = dict(domainType=S("com.apple.dt.IDE.UnitTestLogSection.Coverage"), title=S(title), startTime=T(t0),
+                     duration=D(max(0.0, t1 - t0)), result=S("succeeded"), subsections=[], attachments=[],
+                     messages=notes(msgs))
+            if details:
+                f["wasSkipped"] = B(False)
+            return O("ActivityLogUnitTestSection", **f)
+        t0, tm, t1 = float(cov["started"]), float(cov.get("merged") or cov["started"]), float(cov.get("finished") or cov["started"])
+        files = sorted({f["file"] for p in cov["products"] for f in p.get("files") or []})
+        ver = " (%s)" % cov["profdata_version"] if cov.get("profdata_version") else ""
+        subs = [step("Downloading profiles from %s" % self.di["name"], t0, t0),
+                step("Merging %d profiles using llvm-profdata%s" % (cov.get("profiles") or 0, ver), t0, tm, details=False),
+                step("Pre-processing target built products", tm, tm),
+                step("Processing source file data", tm, t1,
+                     ["Archived line-level coverage for %d file(s):\n%s" % (len(files), "\n".join(files))]),
+                step("Generating target entries", t1, t1,
+                     ["Generating entry for target %s" % p["name"] for p in cov["products"]])]
+        return O("ActivityLogUnitTestSection", domainType=S("com.apple.dt.IDE.UnitTestLogSection.Coverage"),
+                 title=S("Generating coverage report"), startTime=T(t0), duration=D(max(0.0, t1 - t0)),
+                 result=S("succeeded"), subsections=subs, messages=[], attachments=[], wasSkipped=B(False))
+
+    @staticmethod
     def session_name(target):
         """Xcode's name for a target's session log: Session-<Target>-<YYYY-MM-DD_HHMMSS>-<6 letters>.log"""
         when = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(float(target.get("started") or 0) or time.time()))
@@ -1048,6 +1162,11 @@ class Writer:
             testables.append(self.testable(t, at))
             logs.append(self.log_section(t, at))
             clock = at + float(t.get("duration") or 0)
+        launches, covlog = self.launch_actions(targets), self.coverage_log(s.get("coverage"))
+        if covlog:
+            logs.insert(0, covlog)
+        if launches:
+            logs.insert(0, launches)
         end = self.t0 + float(s.get("duration") or (clock - self.t0))
         tests_ref = self.st.obj(O("ActionTestPlanRunSummaries", summaries=[
             O("ActionTestPlanRunSummary", name=S(RUN_NAME), testableSummaries=testables)]))
