@@ -22,7 +22,7 @@ compiler. Upstream lldb (/usr/bin/lldb) has neither. Two things keep it from wor
 
 lldbattach.py then runs that lldb with `settings set target.sdk-path` set to the phone's simulator SDK.
 """
-import hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, urllib.request
+import hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile
 
 # python-build-standalone, x86_64-unknown-linux-gnu, install_only_stripped (a shared libpython3.X.so.1.0)
 PBS = {
@@ -193,17 +193,13 @@ def install_python(ver, say):
     try:
         tgz = os.path.join(tmp, "python.tar.gz")
         say("== swift lldb: download Python %s (python-build-standalone %s, %s)" % (full, tag, url))
+        # curl uses the OS trust store (urllib's default CA paths are empty on NixOS and minimal containers)
+        if subprocess.run(["curl", "-fL", "--retry", "3", "--progress-bar", "-o", tgz, url]).returncode:
+            raise RuntimeError("Python download failed (curl)")
         h = hashlib.sha256()
-        with urllib.request.urlopen(url, timeout=60) as r, open(tgz, "wb") as f:
-            total, n, last = int(r.headers.get("Content-Length") or 0), 0, -1
-            while True:
-                b = r.read(1 << 20)
-                if not b:
-                    break
-                f.write(b); h.update(b); n += len(b)
-                if total and n * 10 // total != last:
-                    last = n * 10 // total
-                    say("   %d%% of %.0f MB" % (last * 10, total / 1e6))
+        with open(tgz, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
         if h.hexdigest() != sha:
             raise RuntimeError("Python download: sha256 %s, expected %s" % (h.hexdigest(), sha))
         say("== swift lldb: unpack into " + dest)
@@ -311,11 +307,11 @@ def setup_one(usr, say):
     if res:
         lldb = os.path.join(make_shadow(usr, lib, res, say), "bin/lldb")
         info["resource_dir"] = res
-        # liblldb's own RUNPATH ($ORIGIN/../lib/swift/linux, .../host/compiler) now points into the view: the originals
-        info["ld_library_path"] += [os.path.join(usr, "lib/swift/linux"), os.path.join(usr, "lib/swift/host/compiler")]
     else:
         say("   no Darwin Swift resource dir (the SDK bundle of `x86sim dev setup`): frame variable works, po / "
             "expression of Swift values do not")
+    # _lldb.so needs libswiftCore even without a Darwin resource dir (liblldb's RUNPATH points into the view)
+    info["ld_library_path"] += [os.path.join(usr, "lib/swift/linux"), os.path.join(usr, "lib/swift/host/compiler")]
     info["lldb"] = lldb
     env = lldb_env(info)
     ok, out = runs([lldb, "--version"], env)
@@ -323,7 +319,8 @@ def setup_one(usr, say):
         raise RuntimeError("lldb does not start: " + out[-400:])
     info["lldb_version"] = " ".join(out.split())
     ok, ppath = runs([lldb, "-P"], env)
-    info["python_path"] = ppath.splitlines()[-1] if ok and ppath else None
+    # runs() appends stderr: loader warnings follow the path, so take the last line that is a directory
+    info["python_path"] = next((l for l in reversed(ppath.splitlines()) if os.path.isdir(l)), None) if ok else None
     if info["python_exe"] and info["python_path"]:
         e = dict(env, PYTHONPATH=info["python_path"])
         ok, out = runs([info["python_exe"], "-c", "import lldb; print(lldb.SBDebugger.GetVersionString())"], e)
