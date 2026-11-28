@@ -61,11 +61,14 @@ fi
 #   whose Apple build is a macOS-only binary, so build/swiftui-macros/ is compiled for Linux (once, kept up to date).
 PLUG=$RES/host-plugins; MSRC=$R/build/swiftui-macros/SwiftUIMacros.swift
 if [ ! -f "$PLUG/libSwiftUIMacros.so" ] || [ "$MSRC" -nt "$PLUG/libSwiftUIMacros.so" ]; then
-	H=$TC/usr/lib/swift/host; mkdir -p "$PLUG"
+	# a module cache of its own each time: clang's .pcm files name the cache path they were built in, so a kept one
+	# fails every later build reached by another path (a worktree's sdks symlink, a moved checkout)
+	H=$TC/usr/lib/swift/host; mkdir -p "$PLUG"; mc=$(mktemp -d "$PLUG/.mc.XXXXXX")
 	"$TC/usr/bin/swiftc" -O -emit-library -module-name SwiftUIMacros -I "$H" -L "$H" -lSwiftSyntax -lSwiftSyntaxMacros \
-		-lSwiftSyntaxBuilder -lSwiftDiagnostics -Xlinker -rpath -Xlinker "$H" -module-cache-path "$PLUG/.mc" \
-		"$MSRC" -o "$PLUG/libSwiftUIMacros.so.$$" >&2 && mv "$PLUG/libSwiftUIMacros.so.$$" "$PLUG/libSwiftUIMacros.so" ||
-		die "building the SwiftUIMacros plugin failed"
+		-lSwiftSyntaxBuilder -lSwiftDiagnostics -Xlinker -rpath -Xlinker "$H" -module-cache-path "$mc" \
+		"$MSRC" -o "$PLUG/libSwiftUIMacros.so.$$" >&2 && mv "$PLUG/libSwiftUIMacros.so.$$" "$PLUG/libSwiftUIMacros.so"
+	rc=$?; rm -rf "$mc" "$PLUG/libSwiftUIMacros.so.$$"
+	[ "$rc" = 0 ] || die "building the SwiftUIMacros plugin failed"
 fi
 exec "$TC/usr/bin/swiftc" -sdk "$sdk" -target "$tgt" -resource-dir "$RES" -Isystem "$sdk/usr/lib/swift/shims" \
 	-plugin-path "$PLUG" -use-ld=lld -ld-path="$LLD" -Xclang-linker -resource-dir -Xclang-linker "$RES/clang" \

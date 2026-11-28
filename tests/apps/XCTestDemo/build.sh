@@ -1,7 +1,9 @@
 #!/bin/bash
 # x86Sim: build XCTestDemo (app + hosted unit tests + logic tests + UI tests) for testing, as `xcodebuild
 # build-for-testing` does, on the Mac ($X86SIM_MAC: Xcode's XCTest can't be linked into an Xcode project's targets on
-# Linux), and copy the products (.app, .xctest, the UITests-Runner.app and the .xctestrun) back:
+# Linux), and copy the products (.app, .xctest, the UITests-Runner.app, the .xctestrun and the dSYMs) back. The Mac's
+# work dir is deleted after the build, so its debug info comes back as dSYMs (a Debug build keeps it in the object files,
+# which x86sim test can't reach here); x86sim test reads them for where a thrown error came from:
 #   tests/apps/XCTestDemo/build.sh [OUT]     (default $X86SIM_SCRATCH/apps/XCTestDemo-products)
 # X86SIM_PLATFORM=tvos|watchos|xros builds it for that simulator instead of iOS (default OUT: ...-products-<platform>)
 # Then: x86sim test <phone> --xctestrun OUT/XCTestDemo_iphonesimulator*.xctestrun  (or run.sh <phone>)
@@ -22,7 +24,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 tar cf - -C "$X86SIM_ROOT/tests/apps" --exclude spm XCTestDemo | ssh -o BatchMode=yes "$MAC" "export SDK=$SDK DEST='$DEST';" 'set -e
 	W=$(mktemp -d /tmp/xctestdemo.XXXXXX); trap "rm -rf $W" EXIT; cd $W; tar xf -; cd XCTestDemo
 	nice xcodebuild -project XCTestDemo.xcodeproj -scheme XCTestDemo -sdk $SDK \
-		-destination "generic/platform=$DEST" -derivedDataPath $W/dd ARCHS=arm64 build-for-testing > $W/build.log 2>&1 ||
+		-destination "generic/platform=$DEST" -derivedDataPath $W/dd ARCHS=arm64 DEBUG_INFORMATION_FORMAT=dwarf-with-dsym build-for-testing > $W/build.log 2>&1 ||
 		{ tail -40 $W/build.log >&2; exit 1; }
 	cd $W/dd/Build/Products && COPYFILE_DISABLE=1 tar cf - .' | tar xf - -C "$OUT" 2>/dev/null
 ls "$OUT"/*.xctestrun
